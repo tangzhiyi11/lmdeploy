@@ -27,6 +27,9 @@ class PpuOpsBackend(DlinferOpsBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
+        # ix
+        return (num_heads, block_size, head_size)
+
         x = 8
         return (num_heads, head_size // x, block_size, x)
         # return (block_size, num_heads, head_size)
@@ -38,6 +41,9 @@ class PpuOpsBackend(DlinferOpsBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
+        # ix
+        return (num_heads, block_size, head_size)
+
         return (num_heads, head_size, block_size)
         # return (block_size, num_heads, head_size)
 
@@ -54,7 +60,11 @@ class PpuOpsBackend(DlinferOpsBackend):
             return cls.total_slots
 
         kv_start_indices, attention_mask = [], []
-        block_num, _, _, block_size = step_context.kv_caches[0][1].shape
+
+        # block_num, _, _, block_size = step_context.kv_caches[0][1].shape
+        # ix
+        block_num, _, block_size, _ = step_context.kv_caches[0][1].shape
+
         device = step_context.block_offsets.device
 
         is_unpaged_prefill = False
