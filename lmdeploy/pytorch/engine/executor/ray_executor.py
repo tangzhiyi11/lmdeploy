@@ -32,7 +32,7 @@ PG_WAIT_TIMEOUT = 1800
 def get_device_str():
     """get device str."""
     device_type = get_device_manager().current_context().device_type
-    if device_type == 'cuda':
+    if device_type == 'cuda' or device_type== 'ix':
         device_type = 'GPU'
     elif device_type == 'ascend':
         device_type = 'NPU'
@@ -102,11 +102,13 @@ def init_ray_cluster(world_size: int, ray_address: str = None, dp: int = 1):
     # modifier from vLLM
     if not ray.is_initialized():
         try:
+            num_gpus = world_size
             num_cpus = world_size
             object_store_memory = _get_obj_store_memory(dp=dp)
             ray.init(address=ray_address,
                      ignore_reinit_error=True,
                      num_cpus=num_cpus,
+                     num_gpus=num_gpus,
                      object_store_memory=object_store_memory)
         except ValueError as e:
             if e.args is not None and len(e.args) >= 1 and e.args[
@@ -570,7 +572,7 @@ class RayExecutor(ExecutorBase):
     def _init_distributed_environment_by_device(self, device_str: str):
         """init distributed environment."""
         driver_ip = _get_master_addr()
-        if device_str == 'cuda':
+        if device_str == 'cuda' or device_str == 'ix':
             self.workers = self._sort_workers(driver_ip, self.workers)
         elif device_str == 'ascend':
             rank_mapping, worker_ips, envs = get_ascend_device_rank_mapping(driver_ip)

@@ -171,12 +171,12 @@ class CacheEngine:
         num_layers = self.num_layers
         kv_cache_dtype = self.kv_cache_dtype
 
-        key_cache = torch.empty(
+        key_cache = torch.zeros(
             size=(num_layers, num_blocks, *key_block_shape),
             dtype=kv_cache_dtype,
             device=device,
         )
-        value_cache = torch.empty(
+        value_cache = torch.zeros(
             size=(num_layers, num_blocks, *value_block_shape),
             dtype=kv_cache_dtype,
             device=device,
@@ -186,12 +186,12 @@ class CacheEngine:
 
         if self.cache_config.quant_policy in (4, 8):
             dtype = self.model_config.dtype
-            key_sz_cache = torch.empty(
+            key_sz_cache = torch.zeros(
                 size=(num_layers, num_blocks, *key_block_shape[:-1], 2),
                 dtype=dtype,
                 device=device,
             )
-            val_sz_cache = torch.empty(
+            val_sz_cache = torch.zeros(
                 size=(num_layers, num_blocks, *value_block_shape[:-1], 2),
                 dtype=dtype,
                 device=device,
@@ -294,15 +294,15 @@ class CacheEngine:
         )
         if quant_policy == 0:
             dtype = model_config.dtype
-            key_block = torch.empty(key_shape, dtype=dtype, device='meta')
-            value_block = torch.empty(value_shape, dtype=dtype, device='meta')
+            key_block = torch.zeros(key_shape, dtype=dtype, device='meta')
+            value_block = torch.zeros(value_shape, dtype=dtype, device='meta')
             mem_key_block = key_block.numel() * key_block.element_size()
             mem_value_block = value_block.numel() * value_block.element_size()
         elif quant_policy in (4, 8):
-            key_block = torch.empty(key_shape, dtype=torch.uint8, device='meta')
-            value_block = torch.empty(value_shape, dtype=torch.uint8, device='meta')
-            key_scale_zero_block = torch.empty((*key_shape[:-1], 2), dtype=model_config.dtype, device='meta')
-            value_scale_zero_block = torch.empty((*value_shape[:-1], 2), dtype=model_config.dtype, device='meta')
+            key_block = torch.zeros(key_shape, dtype=torch.uint8, device='meta')
+            value_block = torch.zeros(value_shape, dtype=torch.uint8, device='meta')
+            key_scale_zero_block = torch.zeros((*key_shape[:-1], 2), dtype=model_config.dtype, device='meta')
+            value_scale_zero_block = torch.zeros((*value_shape[:-1], 2), dtype=model_config.dtype, device='meta')
             mem_key_block = key_block.numel() * key_block.element_size() + key_scale_zero_block.numel(
             ) * key_scale_zero_block.element_size()
             mem_value_block = value_block.numel() * value_block.element_size() + value_scale_zero_block.numel(
