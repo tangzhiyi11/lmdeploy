@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Any
 
 from torch import Tensor
 
@@ -18,6 +18,7 @@ class DlinferAttentionMetadata(AttentionMetadata):
     max_kv_seq_len: int = 1
     quant_meta: Dict = None
     cu_seq_lens_kv: Optional[Tensor] = None
+    flashinfer_wrapper: Optional[Any] = None
 
 
 class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
@@ -141,6 +142,7 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
             kv_scales=kv_scales,
             kv_zeros=kv_zeros,
             quant_bits=quant_bits,
+            flashinfer_wrapper=attn_metadata.flashinfer_wrapper,
         )
 
         return attn_output
