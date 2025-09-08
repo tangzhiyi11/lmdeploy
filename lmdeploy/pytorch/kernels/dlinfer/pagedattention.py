@@ -3,6 +3,7 @@ import dlinfer.ops as ext_ops
 import torch
 from dlinfer.utils.type_annotation import Optional, Sequence, Tensor
 
+from typing import Any
 
 def prefill_attention(
     query_states: Tensor,
@@ -89,6 +90,7 @@ def paged_token_attention(
     kv_scales: Optional[Tensor],
     kv_zeros: Optional[Tensor],
     quant_bits: Optional[int],
+    flashinfer_wrapper: Optional[Any],
 ):
     return ext_ops.paged_decode_attention(
         q,
@@ -106,6 +108,7 @@ def paged_token_attention(
         kv_scales=kv_scales,
         kv_zeros=kv_zeros,
         quant_bits=quant_bits,
+        flashinfer_wrapper=flashinfer_wrapper,
     )
 
 
@@ -134,6 +137,7 @@ def paged_attention_fwd(
     kv_scales: Optional[Tensor] = None,
     kv_zeros: Optional[Tensor] = None,
     quant_bits: Optional[int] = 0,
+    flashinfer_wrapper: Optional[Any] = None,
 ):
     if not is_decoding:
         return prefill_attention(
@@ -178,4 +182,5 @@ def paged_attention_fwd(
             kv_scales=kv_scales,
             kv_zeros=kv_zeros,
             quant_bits=quant_bits,
+            flashinfer_wrapper=flashinfer_wrapper,
         )
