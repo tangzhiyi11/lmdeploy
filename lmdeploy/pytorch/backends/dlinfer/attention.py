@@ -19,6 +19,8 @@ class DlinferAttentionMetadata(AttentionMetadata):
     quant_meta: Dict = None
     cu_seq_lens_kv: Optional[Tensor] = None
     flashinfer_wrapper: Optional[Any] = None
+    is_mla: bool = False
+    use_flashinfer: bool = False
 
 
 class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
@@ -68,6 +70,7 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
         v_scales_zeros: Tensor = None,
         learnable_sink: Tensor = None,
         inplace: bool = True,
+        mla_latent_cache: Tensor = None,
     ) -> Tensor:
         """forward."""
 
@@ -101,14 +104,24 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
             kv_zeros = None
 
         # fill kv cache
-        k_cache, v_cache = self.fill_kv_cache(key,
-                                              value,
-                                              k_cache,
-                                              v_cache,
-                                              kv_start_indices,
-                                              k_scales_zeros=k_scales_zeros,
-                                              v_scales_zeros=v_scales_zeros,
-                                              quant_bits=quant_bits)
+        if mla_latent_cache is None:
+            k_cache, v_cache = self.fill_kv_cache(key,
+                                                value,
+                                                k_cache,
+                                                v_cache,
+                                                kv_start_indices,
+                                                k_scales_zeros=k_scales_zeros,
+                                                v_scales_zeros=v_scales_zeros,
+                                                quant_bits=quant_bits)
+        else:
+            k_cache, v_cache = self.fill_kv_cache(mla_latent_cache,
+                                                mla_latent_cache,
+                                                k_cache,
+                                                v_cache,
+                                                kv_start_indices,
+                                                k_scales_zeros=k_scales_zeros,
+                                                v_scales_zeros=v_scales_zeros,
+                                                quant_bits=quant_bits)
 
         if inplace:
             attn_output = query[..., :self.v_head_size]

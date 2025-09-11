@@ -24,7 +24,7 @@ class W8A8Linear(LinearBase):
                  is_tp: bool = False,
                  all_reduce: bool = True,
                  quant_dtype: Optional[torch.dtype] = torch.int8):
-        super().__init__(dtype=torch.float16, device=device, colwise=colwise, is_tp=is_tp, all_reduce=all_reduce)
+        super().__init__(dtype=torch.float16 if dtype is None else dtype, device=device, colwise=colwise, is_tp=is_tp, all_reduce=all_reduce)
         if self.is_tp:
             in_features, out_features = self._get_io_features(in_features, out_features, colwise)
         impl_builder = get_backend().get_layer_impl_builder(OpType.LinearW8A8)

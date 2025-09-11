@@ -27,8 +27,8 @@ class DlinferLinearW8A8Impl(LinearW8A8Impl):
     def update_weights(self, weight: torch.Tensor, scale: torch.Tensor, bias: Optional[torch.Tensor] = None):
         """Update weights."""
         if os.getenv('DLINFER_LINEAR_USE_NN_LAYOUT', '0') == '1':
-            weight = weight.data.t().contiguous()
-            scale = scale.data.t().contiguous()
+            weight = weight.data.t()
+            scale = scale.data.t()
         return weight, scale, bias
 
     def forward(self,

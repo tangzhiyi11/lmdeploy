@@ -2,6 +2,7 @@
 from typing import Tuple
 
 import math
+import os
 
 import torch
 
@@ -85,19 +86,21 @@ class FlashInferMeta:
         return cls.mask_max_arange_tensor[:size]
 
     @classmethod
-    def _get_flashinfer_decode_wrapper(cls,):
+    def _get_flashinfer_decode_wrapper(cls, device=None):
         """Get flashinfer decode wrapper. TODO: Implement this method."""
         if cls.flashinfer_decode_wrapper is None:
             with cls._get_lock():
                 import flashinfer
+                if device is None:
+                    device = 0
                 if cls.is_mla:
                     cls.flashinfer_decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-                                torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0),
+                                torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(device),
                                 backend="auto",
                             )
                 else:
                     cls.flashinfer_decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-                                torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0),
+                                torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(device),
                                 # backend="auto",
                             )
         return cls.flashinfer_decode_wrapper
@@ -112,7 +115,7 @@ class MacaOpsBackend(DlinferOpsBackend):
     """Maca layer backend."""
     total_slots = None
     enable_graph = False
-    use_flashinfer = flashinfer_available()
+    flashinfer_available = flashinfer_available()
 
     @staticmethod
     def get_name() -> str:
@@ -127,7 +130,7 @@ class MacaOpsBackend(DlinferOpsBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
-        if cls.use_flashinfer:
+        if cls.flashinfer_available and num_heads == 1 and head_size == 576:
             return (num_heads, block_size, head_size)
         else:
             x = 16
@@ -155,7 +158,7 @@ class MacaOpsBackend(DlinferOpsBackend):
             return cls.total_slots
 
         kv_start_indices, attention_mask = [], []
-        block_num, _, block_size, v_head_size = step_context.kv_caches[0][1].shape
+        block_num, _, block_size, _ = step_context.kv_caches[0][1].shape
         device = step_context.block_offsets.device
 
         is_unpaged_prefill = False
@@ -169,6 +172,11 @@ class MacaOpsBackend(DlinferOpsBackend):
         max_q_seq_len = torch.max(q_seqlens).item()
         max_kv_seq_len = torch.max(kv_seqlens).item()
 
+        k_head_dim = step_context.model_config.k_head_dim
+        v_head_dim = step_context.model_config.v_head_dim
+        is_mla = FlashInferMeta._get_is_mla(k_head_dim, v_head_dim)
+        use_flashinfer = cls.flashinfer_available and is_mla
+
         if step_context.is_decoding:
             # collect kv_start_indices without using a for-loop,
             # (fill kv-cache for just ONE token during the decoding phase)
@@ -177,12 +185,9 @@ class MacaOpsBackend(DlinferOpsBackend):
             last_block = step_context.block_offsets.gather(1, b_num.view(-1, 1)).view(-1)
             kv_start_indices = (last_block * block_size + idx).reshape((-1, 1))
 
-            if cls.use_flashinfer:
-                _, _, _, k_head_size = step_context.kv_caches[0][0].shape
-                is_mla = FlashInferMeta._get_is_mla(k_head_size, v_head_size)
-
+            if use_flashinfer:
                 if not cls.enable_graph:
-                    eager_decode_wrapper = FlashInferMeta._get_flashinfer_decode_wrapper()
+                    eager_decode_wrapper = FlashInferMeta._get_flashinfer_decode_wrapper(device)
                     page_size = block_size
 
                     zero_tensor = FlashInferMeta._get_zero_tensor(device)
@@ -199,42 +204,24 @@ class MacaOpsBackend(DlinferOpsBackend):
                     kv_lens = kv_seqlens
                     num_local_heads = step_context.model_config.num_attention_heads // tp_size
 
-                    if is_mla:
-                        q_indptr = FlashInferMeta._get_q_indptr_arrange(device, kv_seqlens.shape[0] + 1)
-                        sm_scale = FlashInferMeta._get_sm_scale()
-                        head_dim_ckv = step_context.model_config.hf_config.kv_lora_rank
-                        head_dim_kpe = step_context.model_config.hf_config.qk_rope_head_dim
-                        eager_decode_wrapper.plan(
-                            q_indptr,
-                            kv_indptr,
-                            kv_indices,
-                            kv_lens,
-                            num_local_heads,
-                            head_dim_ckv,
-                            head_dim_kpe,
-                            page_size,
-                            False,  # causal
-                            sm_scale,
-                            torch.bfloat16,
-                            torch.bfloat16,
-                        )
-                    else:
-                        num_local_kv_heads = step_context.model_config.num_key_value_heads // tp_size
-                        sm_scale = float(1 / math.sqrt(step_context.model_config.head_dim))
-                        eager_decode_wrapper.plan(
-                            indptr=kv_indptr,
-                            indices=kv_indices,
-                            last_page_len=idx,
-                            num_qo_heads=num_local_heads,
-                            num_kv_heads=num_local_kv_heads,
-                            head_dim=step_context.model_config.k_head_dim,
-                            page_size=page_size,
-                            pos_encoding_mode='NONE',
-                            window_left=-1,
-                            q_data_type=torch.bfloat16,
-                            kv_data_type=torch.bfloat16,
-                            sm_scale=sm_scale,
-                        )
+                    q_indptr = FlashInferMeta._get_q_indptr_arrange(device, kv_seqlens.shape[0] + 1)
+                    sm_scale = FlashInferMeta._get_sm_scale()
+                    head_dim_ckv = step_context.model_config.hf_config.kv_lora_rank
+                    head_dim_kpe = step_context.model_config.hf_config.qk_rope_head_dim
+                    eager_decode_wrapper.plan(
+                        q_indptr,
+                        kv_indptr,
+                        kv_indices,
+                        kv_lens,
+                        num_local_heads,
+                        head_dim_ckv,
+                        head_dim_kpe,
+                        page_size,
+                        False,  # causal
+                        sm_scale,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                    )
 
         else:
             for i in range(step_context.q_start_loc.size(0)):
@@ -261,9 +248,12 @@ class MacaOpsBackend(DlinferOpsBackend):
             is_unpaged_prefill=is_unpaged_prefill,
             max_q_seq_len=max_q_seq_len,
             max_kv_seq_len=max_kv_seq_len,
+            is_mla=is_mla,
+            use_flashinfer=(use_flashinfer and step_context.is_decoding),
         )
 
-        if step_context.is_decoding and cls.use_flashinfer and not cls.enable_graph:
+        if step_context.is_decoding and use_flashinfer and not cls.enable_graph:
+            attn_metadata.use_flashinfer = True
             attn_metadata.flashinfer_wrapper = eager_decode_wrapper
 
         step_context.attn_metadata = attn_metadata
@@ -281,4 +271,5 @@ class MacaOpsBackend(DlinferOpsBackend):
     @staticmethod
     def support_ray():
         """Support ray."""
+        os.environ['RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES'] = '1'
         return True

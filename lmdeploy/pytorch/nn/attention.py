@@ -76,6 +76,7 @@ class Attention(nn.Module):
         v_scales_zeros: torch.Tensor = None,
         s_aux: torch.Tensor = None,
         inplace: bool = True,
+        mla_latent_cache: torch.Tensor = None,
     ) -> torch.Tensor:
         """forward."""
         return self.impl.forward(
@@ -89,6 +90,7 @@ class Attention(nn.Module):
             v_scales_zeros=v_scales_zeros,
             learnable_sink=s_aux,
             inplace=inplace,
+            mla_latent_cache=mla_latent_cache,
         )
 
     @staticmethod

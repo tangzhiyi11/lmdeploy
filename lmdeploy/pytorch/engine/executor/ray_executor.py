@@ -184,6 +184,10 @@ class RayWorkerWrapper(WorkerWrapperBase):
 
     def set_device(self, local_rank):
         """Set worker local rank."""
+        device_count = torch.cuda.device_count()
+        before_local_rank = local_rank
+        local_rank = local_rank if local_rank <= 7 else local_rank % 8
+        print(f'############# {local_rank=} {before_local_rank=} {device_count=}')
         torch.cuda.set_device(local_rank)
 
     def set_env(self, envs: Dict[str, str]):
@@ -551,7 +555,13 @@ class RayExecutor(ExecutorBase):
         driver_ip = _get_master_addr()
         if device_str in ['cuda', 'maca']:
             self.workers = self._sort_workers(driver_ip, self.workers)
-
+            ray.get([worker.set_device.remote(idx) for idx, worker in enumerate(self.workers)])
+            envs = {
+                "TRITON_ENABLE_MACA_OPT_MOVE_DOT_OPERANDS_OUT_LOOP": "1",
+                "TRITON_ENABLE_MACA_CHAIN_DOT_OPT": "1",
+                "MACA_SMALL_PAGESIZE_ENABLE" : "1",
+            }
+            ray.get([worker.set_env.remote(envs) for worker in self.workers])
         elif device_str == 'ascend':
             self._init_ascend_distributed_environment(driver_ip)
         elif device_str == 'camb':
