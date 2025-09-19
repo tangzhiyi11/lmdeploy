@@ -335,7 +335,7 @@ def get_max_batch_size(device_type: str):
     Args:
         device_type (str): the type of device
     """
-    assert device_type in ['cuda', 'ascend', 'maca', 'camb']
+    assert device_type in ['cuda', 'ascend', 'maca', 'camb', 'ppu']
     if device_type == 'cuda':
         max_batch_size_map = {'a100': 384, 'a800': 384, 'h100': 1024, 'h800': 1024, 'l20y': 1024, 'h200': 1024}
         import torch
@@ -351,6 +351,8 @@ def get_max_batch_size(device_type: str):
     elif device_type == 'maca':
         return 256
     elif device_type == 'camb':
+        return 256
+    elif device_type == 'ppu':
         return 256
 
 
@@ -401,6 +403,7 @@ def try_import_deeplink(device_type: str):
         'npu',
         'maca',
         'camb',
+        'ppu',
     ]
     if device_type in deeplink_device_type_list:
         try:
