@@ -31,6 +31,7 @@ from ..utils import get_gpu_memory
 from ..weight_loader.model_weight_loader import load_model_weights
 from .cache_engine import CacheEngine
 from .logits_process import FusedLogitsProcessor, SamplingInputs
+import torch_npu
 
 logger = get_logger('lmdeploy')
 
