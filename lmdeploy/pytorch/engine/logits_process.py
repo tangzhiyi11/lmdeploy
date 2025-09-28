@@ -5,10 +5,10 @@ from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch_npu
 
 from lmdeploy.messages import LogitsProcessor
 from lmdeploy.tokenizer import Tokenizer
-import torch_npu
 
 from ..messages import SchedulerSequence
 

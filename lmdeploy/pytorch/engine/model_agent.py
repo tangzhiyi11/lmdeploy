@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from lmdeploy.pytorch.disagg.config import EngineRole
@@ -31,7 +32,6 @@ from ..utils import get_gpu_memory
 from ..weight_loader.model_weight_loader import load_model_weights
 from .cache_engine import CacheEngine
 from .logits_process import FusedLogitsProcessor, SamplingInputs
-import torch_npu
 
 logger = get_logger('lmdeploy')
 
