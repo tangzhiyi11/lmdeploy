@@ -16,6 +16,8 @@ from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .utils.cudagraph import CudaGraphMixin
 
+from lmdeploy.utils import get_logger
+logger = get_logger('lmdeploy')
 
 class Qwen3MoeAttention(nn.Module):
     """Rewrite module of Qwen3MoeAttention."""
@@ -293,7 +295,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        #logger.error(f'after attn: hidden: {hidden_states.shape}, res: {residual.shape}')
         hidden_states = self.mlp(hidden_states)
+        #logger.error(f'after mlp: hidden: {hidden_states.shape}')
 
         outputs = (hidden_states, residual)
         return outputs
@@ -361,6 +365,7 @@ class Qwen3MoeModel(nn.Module):
         # decoding
         residual = None
         for idx, decoder_layer in enumerate(self.layers):
+            #logger.error(f'start..... {idx}')
             past_key_value = past_key_values[idx]
             hidden_states, residual = decoder_layer(
                 hidden_states,
@@ -369,6 +374,7 @@ class Qwen3MoeModel(nn.Module):
                 residual=residual,
                 attn_metadata=attn_metadata,
             )
+            #logger.error(f'end..... {idx}')
 
         # norm
         hidden_states, _ = self.norm(hidden_states, residual)

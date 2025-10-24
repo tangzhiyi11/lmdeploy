@@ -12,6 +12,7 @@ from ..config import CacheConfig, SchedulerConfig
 from ..messages import MessageStatus, SchedulerSequence, SchedulerSession, SequenceManager, SequenceMeta
 from .block_manager import build_block_manager
 from .block_trie import BlockTrie
+import torch.distributed as dist
 
 logger = get_logger('lmdeploy')
 
@@ -280,7 +281,7 @@ class Scheduler:
                 continue
 
             if not __evict_for_seq(seq, num_required_blocks):
-                logger.warning(f'session[{seq.session_id}] '
+                logger.error(f'session[{seq.session_id}] '
                                f'sequence[{seq.seq_id}] '
                                'to waiting....')
                 self._set_message_status(seq, MessageStatus.WAITING)
@@ -294,14 +295,14 @@ class Scheduler:
     def schedule(self, is_prefill: bool, prealloc_size: int = 0):
         """Schedule inputs for next steps."""
         if is_prefill:
-            #logger.warning('Prefill scheduling')
+            logger.error('Prefill scheduling')
             output = self._schedule_prefill(0)
         else:
-            #logger.warning('Decoding scheduling')
+            logger.error('Decoding scheduling')
             output = self._schedule_decoding(prealloc_size)
         running, swap_in_map, swap_out_map, copy_map = output
-        #if running:
-        #    logger.warning(f'go batch = {len(running)}')
+        if running:
+            logger.error(f'prefill {is_prefill} go batch = {len(running)}')
 
         return SchedulerOutput(running=running, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
 

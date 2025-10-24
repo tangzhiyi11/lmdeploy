@@ -14,6 +14,9 @@ from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 from ..backends import OpType, get_backend
 from .quant_utils import quant_blocked_fp8
 from .utils import div_up
+from lmdeploy.utils import get_logger
+logger = get_logger('lmdeploy')
+
 
 
 class MoeType(Enum):
@@ -100,14 +103,19 @@ class MoEForwardDPTP:
     def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                  output_states: torch.Tensor, tp_sizes: List[int], handle: dist.Work):
         """Gemm and reduce scatter."""
+        didx = hidden_states.device.index
         handle.wait()
+        logger.error(f'rank {torch.distributed.get_rank()} p3++1:, {torch.npu.mem_get_info(didx)}')
         cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
+        logger.error(f'rank {torch.distributed.get_rank()} p3++2:, {torch.npu.mem_get_info(didx)} cur_out {cur_out.shape}')
         cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+        logger.error(f'rank {torch.distributed.get_rank()} p3++3:, {torch.npu.mem_get_info(didx)} cur_out_states {cur_out_states.shape}')
         output_states.copy_(cur_out_states)
         return self.reduce_scatter(cur_out, output_states, tp_sizes)
 
     def forward(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
         """forward."""
+        return hidden_states
 
         def __slice_tensor(tensor: torch.Tensor, slice_size: int):
             """Slice tensor."""
@@ -142,22 +150,32 @@ class MoEForwardDPTP:
         tp_sizes = step_ctx.dp_meta.moe_tp_sizes
         tp_sizes = torch.tensor(tp_sizes)
         max_tokens_per_round = tp_sizes.new_tensor(self.max_tokens_per_round)
+        didx = hidden_states.device.index
+        logger.error(f'rank {torch.distributed.get_rank()} p0:, {torch.npu.mem_get_info(didx)}')
 
         output_states = torch.empty_like(hidden_states)
         return_states = output_states
+        logger.error(f'rank {torch.distributed.get_rank()} p1:, {torch.npu.mem_get_info(didx)}')
 
         # pre
         cur_inputs = __slice_and_gather()
 
+        logger.error(f'rank {torch.distributed.get_rank()} p2:, {torch.npu.mem_get_info(didx)}  +++ {tp_sizes}')
         # main loop
         while tp_sizes.sum() > 0:
             next_inputs = __slice_and_gather()
             self._gemm_and_reduce_scatter(**cur_inputs)
             cur_inputs = next_inputs
+            logger.error(f'rank {torch.distributed.get_rank()} p3--:, {torch.npu.mem_get_info(didx)}')
+        logger.error(f'rank {torch.distributed.get_rank()} p3:, {torch.npu.mem_get_info(didx)}')
 
         # post
         _, handle = self._gemm_and_reduce_scatter(**cur_inputs)
         handle.wait()
+        logger.error(f'rank {torch.distributed.get_rank()} p4:, {torch.npu.mem_get_info(didx)}')
+        #if torch.npu.empty_cache:
+        #    torch.npu.empty_cache()
+        logger.error(f'rank {torch.distributed.get_rank()} p5:, {torch.npu.mem_get_info(didx)}')
         return return_states
 
 

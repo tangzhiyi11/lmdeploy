@@ -405,14 +405,15 @@ class BaseModelAgent:
                                                      vocab_size=self.model_config.vocab_size)
             if dp > 1:
                 inputs.build_dp_meta()
-            logger.debug('Warmup prefill start.')
+            logger.error('Warmup prefill start.')
             self._forward_impl(inputs)
             torch.cuda.synchronize()
-            logger.debug('Warmup prefill done.')
+            logger.error('Warmup prefill done.')
 
             # warmup decoding(with cuda graph)
             capture_batch_sizes = self.patched_model.get_capture_batch_sizes()
             capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
+            logger.error(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}')
             for num_tokens in capture_batch_sizes:
                 inputs = self.inputs_strategy.make_dummy(num_tokens,
                                                          is_decoding=True,
@@ -420,10 +421,12 @@ class BaseModelAgent:
                                                          vocab_size=self.model_config.vocab_size)
                 if dp > 1:
                     inputs.build_dp_meta()
-                logger.debug(f'Warmup decoding num_tokens={num_tokens} start.')
+                logger.error(f'Warmup decoding num_tokens={num_tokens} start.')
                 self._forward_impl(inputs)
                 torch.cuda.synchronize()
-                logger.debug(f'Warmup decoding num_tokens={num_tokens} done.')
+                logger.error(f'Warmup decoding num_tokens={num_tokens} done.')
+                logger.error(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}')
+                print(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}')
 
     def _slice_outs(self, inputs: torch.Tensor, seq_length: torch.LongTensor):
         """Slice outputs."""
