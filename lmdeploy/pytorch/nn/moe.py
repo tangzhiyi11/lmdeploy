@@ -85,19 +85,17 @@ class MoEForwardDPTP:
         # self.max_tokens_per_round = max_tokens_per_round * self.attn_tp // self.tp // 2
         self.max_tokens_per_round = max_tokens_per_round * self.attn_tp // self.tp
 
-    def all_gather(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    def all_gather(self, hidden_states: torch.Tensor, router_logits: torch.Tensor,
                    tp_sizes: List[int], async_op=True):
         """All gather."""
         if async_op:
             hidden_states, _ = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
-            topk_weights, _ = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=True)
-            topk_ids, handle = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=True)
-            return hidden_states, topk_weights, topk_ids, handle
+            router_logits, handle = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=True)
+            return hidden_states, router_logits, handle
         else:
             hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
-            topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=False)
-            topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=False)
-            return hidden_states, topk_weights, topk_ids
+            router_logits = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=False)
+            return hidden_states, router_logits
 
 
     def reduce_scatter(self, hidden_states: torch.Tensor, out_states: torch.Tensor, tp_sizes: List[int], async_op=True):
@@ -115,38 +113,39 @@ class MoEForwardDPTP:
             dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=False)
             return out_states
 
-    def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, router_logits: torch.Tensor,
                                  output_states: torch.Tensor, tp_sizes: List[int], handle: dist.Work, async_op=True):
         """Gemm and reduce scatter."""
         if async_op:
             handle.wait()
+            topk_weights, topk_ids = self.softmax_topk(router_logits)
             cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
             cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
             output_states.copy_(cur_out_states)
             return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
         else:
+            topk_weights, topk_ids = self.softmax_topk(router_logits)
             cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
             cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
             output_states.copy_(cur_out_states)
             return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
 
-    def forward_decode(self, step_ctx, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor, use_async_op=False):
+    def forward_decode(self, step_ctx, hidden_states: torch.Tensor, router_logits: torch.Tensor, use_async_op=False):
         """forward."""
         tp_sizes = step_ctx.dp_meta.moe_tp_sizes
 
         # pre
         if use_async_op:
             cur_hidden_states, _ = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
-            cur_topk_weights, _ = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=True)
-            cur_topk_ids, handle = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=True)
+            cur_router_logits, handle = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=True)
             handle.wait()
         else:
             cur_hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
-            cur_topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=False)
-            cur_topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=False)
+            cur_router_logits = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=False)
 
 
         # MoE gemm
+        cur_topk_weights, cur_topk_ids = self.softmax_topk(cur_router_logits)
         cur_out = self.gemm_func(cur_hidden_states, cur_topk_weights, cur_topk_ids)
         output_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
 
@@ -160,7 +159,7 @@ class MoEForwardDPTP:
             dist.reduce_scatter(output_states, hidden_states_list, group=self.tp_group, async_op=False)
         return output_states
 
-    def forward(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         """forward."""
 
         use_async_op = False
@@ -168,7 +167,7 @@ class MoEForwardDPTP:
 
         if step_ctx.is_decoding:
             # print(f'############################## go to forward_decode!!!!!!!!!!!!!!!!!')
-            return self.forward_decode(step_ctx, hidden_states, topk_weights, topk_ids, use_async_op)
+            return self.forward_decode(step_ctx, hidden_states, router_logits,  use_async_op)
 
 
         def __slice_tensor(tensor: torch.Tensor, slice_size: int):
@@ -179,28 +178,26 @@ class MoEForwardDPTP:
 
         def __slice_and_gather():
             """Slice and gather."""
-            nonlocal hidden_states, topk_weights, topk_ids, tp_sizes, output_states
+            nonlocal hidden_states, router_logits, tp_sizes, output_states
             cur_tp_sizes = tp_sizes.minimum(max_tokens_per_round)
             tp_sizes -= cur_tp_sizes
             cur_tp_sizes = cur_tp_sizes.tolist()
 
             slice_size = cur_tp_sizes[self.gather_rank]
             cur_hidden_states, hidden_states = __slice_tensor(hidden_states, slice_size)
-            cur_topk_weights, topk_weights = __slice_tensor(topk_weights, slice_size)
-            cur_topk_ids, topk_ids = __slice_tensor(topk_ids, slice_size)
+            cur_router_logits, router_logits = __slice_tensor(router_logits, slice_size)
             cur_output, output_states = __slice_tensor(output_states, slice_size)
 
             # all gather
             if use_async_op:
-                cur_hidden_states, cur_topk_weights, cur_topk_ids, handle = self.all_gather(
-                    cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=True)
+                cur_hidden_states, cur_router_logits, handle = self.all_gather(
+                    cur_hidden_states, cur_router_logits, cur_tp_sizes, async_op=True)
             else:
-                cur_hidden_states, cur_topk_weights, cur_topk_ids = self.all_gather(
-                    cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=False)
+                cur_hidden_states, cur_router_logits = self.all_gather(
+                    cur_hidden_states, cur_router_logits, cur_tp_sizes, async_op=False)
                 handle = None
             return dict(hidden_states=cur_hidden_states,
-                        topk_weights=cur_topk_weights,
-                        topk_ids=cur_topk_ids,
+                        router_logits=cur_router_logits,
                         output_states=cur_output,
                         handle=handle,
                         tp_sizes=cur_tp_sizes,
@@ -387,7 +384,7 @@ class FusedMoE(nn.Module):
             device = torch.device('cpu')
         if dtype is None:
             dtype = torch.float16
-        self.init_tp_args(all_reduce, enable_ep)
+        self.init_tp_args(all_reduce, enable_ep, top_k)
 
         impl_builder = get_backend().get_layer_impl_builder(OpType.FusedMoE)
         self.impl = impl_builder.build(top_k, num_experts, renormalize)
@@ -430,7 +427,7 @@ class FusedMoE(nn.Module):
         self.enable_ep = enable_ep
         self.act_func = act_func
 
-    def init_tp_args(self, all_reduce: bool, enable_ep: bool):
+    def init_tp_args(self, all_reduce: bool, enable_ep: bool, top_k):
         """Init tp args."""
         tp, tp_rank = get_tp_world_rank('moe')
         dist_ctx = get_dist_manager().current_context()
@@ -459,7 +456,7 @@ class FusedMoE(nn.Module):
                         moe_type=MoeType.Default,
                     ))['hidden_states']
 
-            self.forward_dptp = MoEForwardDPTP(__gemm_func)
+            self.forward_dptp = MoEForwardDPTP(__gemm_func, top_k)
 
     def update_weights(self):
         """Update weights."""
@@ -508,6 +505,11 @@ class FusedMoE(nn.Module):
         if self.tp > 1 and self.tp_mode == TPMode.DP_TP:
             return self.forward_dptp.forward(hidden_states, topk_weights, topk_ids)
         return self.forward_default(hidden_states, topk_weights, topk_ids)
+
+
+    def forward_with_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        """forward."""
+        return self.forward_dptp.forward(hidden_states, router_logits)
 
 
 class LinearWeightsW8A8(LinearWeights):
