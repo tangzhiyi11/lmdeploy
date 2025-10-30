@@ -397,6 +397,7 @@ class BaseModelAgent:
 
     def warmup(self):
         """warmup."""
+        return
         # TODO: disable for now, do not remove the comments.
         with self.all_context():
             max_batches = self.cache_config.max_batches
@@ -599,6 +600,8 @@ class BaseModelAgent:
     ):
         """Asyc forward task."""
         dist_ctx = get_dist_manager().current_context()
+
+        # import pdb;pdb.set_trace()q
 
         @record_function('update_inputs_for_next_step')
         def __update_inputs(next_token_ids, model_metas, extra_inputs):

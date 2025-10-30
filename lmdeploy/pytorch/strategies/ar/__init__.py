@@ -31,7 +31,8 @@ class ARStrategyFactory(StrategyFactoryBase):
         from .sampling import ARSamplingStrategy
         pad_token_id = self.model_config.bos_token_id
         pad_token_id = 0 if pad_token_id is None else pad_token_id
-        return ARSamplingStrategy(pad_token_id)
+        vocab_size = self.model_config.vocab_size
+        return ARSamplingStrategy(pad_token_id, vocab_size)
 
     def build_model_inputs_strategy(self) -> 'ModelInputsStrategy':
         """Build model inputs strategy."""

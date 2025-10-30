@@ -31,10 +31,84 @@ def _process_bad_words_(scores: torch.Tensor,
 
 def _process_repetition_penalty_(scores: torch.Tensor, input_ids: torch.LongTensor, penalty: torch.Tensor):
     """Process repetition penalty."""
+
+
     score = torch.gather(scores, 1, input_ids)
     penalty = penalty.to(score.dtype)
+
+
     score = torch.where(score < 0, score * penalty[:, None], score / penalty[:, None])
+
     scores.scatter_(1, input_ids, score)
+
+
+    return scores
+
+
+def _get_token_bin_counts_and_mask(tokens: torch.Tensor, vocab_size: int, num_seqs: int):
+    """Get token bin counts and mask, similar to vllm's implementation."""
+    # Compute the bin counts for the tokens.
+    # vocab_size + 1 for padding.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=tokens.device)
+    
+    # Clamp tokens to valid range to avoid index out of bounds
+    tokens_clamped = torch.clamp(tokens, 0, vocab_size)
+    # Ensure tokens are int64 for scatter_add_
+    tokens_clamped = tokens_clamped.to(torch.int64)
+    # Ensure the ones tensor has the same dtype as bin_counts
+    ones_tensor = torch.ones_like(tokens_clamped, dtype=torch.long)
+    bin_counts.scatter_add_(1, tokens_clamped, ones_tensor)
+    bin_counts = bin_counts[:, :vocab_size]
+    mask = bin_counts > 0
+
+    return bin_counts, mask
+
+
+def _process_frequency_presence_penalties_(scores: torch.Tensor, 
+                                         prompt_tokens: torch.Tensor,
+                                         output_tokens: torch.Tensor,
+                                         presence_penalties: torch.Tensor,
+                                         frequency_penalties: torch.Tensor):
+    """Process frequency and presence penalties, following vllm's implementation."""
+    # import pdb;pdb.set_trace()
+    num_seqs, vocab_size = scores.shape
+    
+    # Get token counts and masks for prompt and output tokens
+    _, prompt_mask = _get_token_bin_counts_and_mask(prompt_tokens, vocab_size, num_seqs)
+    output_bin_counts, output_mask = _get_token_bin_counts_and_mask(output_tokens, vocab_size, num_seqs)
+    
+    # Apply frequency penalty: subtract frequency_penalties * output_bin_counts
+    scores -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
+    
+    # Apply presence penalty: subtract presence_penalties * output_mask
+    scores -= presence_penalties.unsqueeze(dim=1) * output_mask
+    
+    return scores
+
+
+def _process_repetition_penalty_vllm_style_(scores: torch.Tensor,
+                                           prompt_tokens: torch.Tensor,
+                                           output_tokens: torch.Tensor,
+                                           repetition_penalties: torch.Tensor):
+    """Process repetition penalty following vllm's implementation exactly."""
+    num_seqs, vocab_size = scores.shape
+    
+    # Get token counts and masks for prompt and output tokens
+    _, prompt_mask = _get_token_bin_counts_and_mask(prompt_tokens, vocab_size, num_seqs)
+    output_bin_counts, output_mask = _get_token_bin_counts_and_mask(output_tokens, vocab_size, num_seqs)
+    
+    # Expand repetition penalties to match vocab_size
+    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(1, vocab_size)
+    
+    # If token appears in prompt or output, apply penalty, otherwise use 1.0 for no-op
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties, 1.0)
+    
+    # If logits are positive, divide by penalty, otherwise multiply by penalty
+    scaling = torch.where(scores > 0, 1.0 / penalties, penalties)
+    scores *= scaling
+    
     return scores
 
 
@@ -88,6 +162,10 @@ class SamplingInputs:
     stop_words: torch.LongTensor = None
     stop_mask: torch.BoolTensor = None
     repetition_penalty: torch.Tensor = None
+    presence_penalty: torch.Tensor = None
+    frequency_penalty: torch.Tensor = None
+    prompt_tokens: torch.Tensor = None
+    output_tokens: torch.Tensor = None
     top_k: torch.LongTensor = None
     top_p: torch.Tensor = None
     min_p: torch.Tensor = None
@@ -214,8 +292,31 @@ class FusedLogitsProcessor:
             scores = _apply_custom_logits_processors(custom_logits_processors, all_ids, scores)
 
         repetition_penalty = sampling_inputs.repetition_penalty
+        # import pdb;pdb.set_trace()
         if repetition_penalty is not None:
-            scores = _process_repetition_penalty_(scores, all_ids, repetition_penalty)
+            repetition_penalty -= 0.1
+            # Use vllm-style repetition penalty if prompt/output tokens are available
+            prompt_tokens = sampling_inputs.prompt_tokens
+            output_tokens = sampling_inputs.output_tokens
+            if prompt_tokens is not None and output_tokens is not None:
+                scores = _process_repetition_penalty_vllm_style_(
+                    scores, prompt_tokens, output_tokens, repetition_penalty
+                )
+            else:
+                # Fallback to original implementation
+                scores = _process_repetition_penalty_(scores, all_ids, repetition_penalty)
+
+        # Apply frequency and presence penalties (now always available)
+        presence_penalty = sampling_inputs.presence_penalty
+        frequency_penalty = sampling_inputs.frequency_penalty
+        prompt_tokens = sampling_inputs.prompt_tokens
+        output_tokens = sampling_inputs.output_tokens
+        
+        if prompt_tokens is not None and output_tokens is not None:
+            scores = _process_frequency_presence_penalties_(
+                scores, prompt_tokens, output_tokens, 
+                presence_penalty, frequency_penalty
+            )
 
         temperature = sampling_inputs.temperature
         if temperature is not None:

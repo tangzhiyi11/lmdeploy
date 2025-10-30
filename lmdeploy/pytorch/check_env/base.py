@@ -52,6 +52,7 @@ class BaseChecker:
             message = 'Please check your environment.'
         logger.debug('Exception', exc_info=1)
         if e is not None:
+            import pdb;pdb.set_trace()
             logger.error(f'{type(e).__name__}: {e}')
         logger.error(f'<{mod_name}> check failed!\n{_red_text(message)}')
         exit(1)

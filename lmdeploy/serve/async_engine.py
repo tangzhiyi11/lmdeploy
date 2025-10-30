@@ -556,6 +556,7 @@ class AsyncEngine(LogitsMixin):
               pbar: Optional[tqdm.tqdm] = None,
               **kwargs):
 
+        # import pdb;pdb.set_trace()
         prompts = [prompts] if AsyncEngine._is_single(prompts) else prompts
         assert isinstance(prompts, List), 'prompts should be a list'
         gen_config = gen_config or GenerationConfig()

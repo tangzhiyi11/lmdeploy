@@ -27,6 +27,58 @@ def _gather_all_ids(pad_id: int, seqs: SeqList, sampling_inputs: SamplingInputs)
     return output
 
 
+def _gather_prompt_output_tokens(pad_id: int, seqs: SeqList, vocab_size: int):
+    """Gather prompt and output tokens separately for frequency/presence penalties."""
+    batch = len(seqs)
+    
+    # Calculate prompt and output lengths for each sequence
+    prompt_lengths = []
+    output_lengths = []
+    
+    for seq in seqs:
+        # For SchedulerSequenceDefault, use output_start_pos to determine prompt length
+        if hasattr(seq, 'num_prompt_tokens'):
+            # If the sequence has num_prompt_tokens attribute, use it
+            prompt_len = seq.num_prompt_tokens
+            output_len = seq.num_valid_ids - seq.num_prompt_tokens
+        else:
+            # For SchedulerSequenceDefault, use output_start_pos
+            # output_start_pos indicates where the output starts
+            prompt_len = seq.output_start_pos if hasattr(seq, 'output_start_pos') else 0
+            output_len = seq.num_valid_ids - prompt_len
+        
+        prompt_lengths.append(prompt_len)
+        output_lengths.append(output_len)
+    
+    # Find max lengths for prompt and output tokens
+    max_prompt_len = max(prompt_lengths) if prompt_lengths else 0
+    max_output_len = max(output_lengths) if output_lengths else 0
+    
+    # Ensure minimum length of 1 to avoid empty tensors
+    max_prompt_len = max(max_prompt_len, 1)
+    max_output_len = max(max_output_len, 1)
+    
+    # Initialize tensors with vocab_size as padding (following vllm's approach)
+    prompt_tokens = torch.full((batch, max_prompt_len), vocab_size, dtype=torch.int64)
+    output_tokens = torch.full((batch, max_output_len), vocab_size, dtype=torch.int64)
+    
+    for idx, seq in enumerate(seqs):
+        prompt_len = prompt_lengths[idx]
+        output_len = output_lengths[idx]
+        
+        # Fill prompt tokens
+        if prompt_len > 0:
+            prompt_ids = torch.from_numpy(seq.valid_ids[:prompt_len])
+            prompt_tokens[idx, :prompt_len] = prompt_ids
+        
+        # Fill output tokens
+        if output_len > 0:
+            output_ids = torch.from_numpy(seq.valid_ids[prompt_len:])
+            output_tokens[idx, :output_len] = output_ids
+    
+    return prompt_tokens, output_tokens
+
+
 def _get_num_ignore_eos(seqs: SeqList):
     """Get num ignore eos."""
     ret = [seq.sampling_param.min_new_tokens - seq.num_new_tokens for seq in seqs]
@@ -36,9 +88,10 @@ def _get_num_ignore_eos(seqs: SeqList):
 class ARSamplingStrategy(SamplingStrategy):
     """Sampling strategy for autoregressive models."""
 
-    def __init__(self, pad_token_id: int) -> None:
+    def __init__(self, pad_token_id: int, vocab_size: int = None) -> None:
         pad_token_id = 0 if pad_token_id is None else pad_token_id
         self.pad_token_id = pad_token_id
+        self.vocab_size = vocab_size
         self.session_to_cleanup = []
 
     def make_sampling_inputs(self, seqs: SeqList) -> SamplingInputs:
@@ -46,6 +99,8 @@ class ARSamplingStrategy(SamplingStrategy):
         batch_size = len(seqs)
         temperature = [None] * batch_size
         repetition_penalty = [None] * batch_size
+        presence_penalty = [None] * batch_size
+        frequency_penalty = [None] * batch_size
         top_k = [None] * batch_size
         top_p = [None] * batch_size
         min_p = [None] * batch_size
@@ -65,6 +120,9 @@ class ARSamplingStrategy(SamplingStrategy):
                 param = seq.sampling_param
                 temperature[idx] = param.temperature
                 repetition_penalty[idx] = param.repetition_penalty
+                # Write hardcoded values for presence and frequency penalties
+                presence_penalty[idx] = 1.0
+                frequency_penalty[idx] = 0.05
                 top_k[idx] = max(0, param.top_k)
                 top_p[idx] = param.top_p
                 min_p[idx] = param.min_p
@@ -128,6 +186,10 @@ class ARSamplingStrategy(SamplingStrategy):
         else:
             repetition_penalty = torch.tensor(repetition_penalty)
 
+        # Process presence and frequency penalties (now always have values)
+        presence_penalty = torch.tensor(presence_penalty)
+        frequency_penalty = torch.tensor(frequency_penalty)
+
         temperature = torch.tensor(temperature)
         if (temperature == 1.0).all():
             # skip temperature processing if all temperature are 1.0
@@ -170,6 +232,8 @@ class ARSamplingStrategy(SamplingStrategy):
             stop_words=stop_words,
             stop_mask=stop_mask,
             repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
             top_k=top_k,
             top_p=top_p,
             min_p=min_p,
@@ -188,6 +252,14 @@ class ARSamplingStrategy(SamplingStrategy):
         pad_token_id = self.pad_token_id
         sampling_input.all_ids = _gather_all_ids(pad_token_id, seqs, sampling_input)
         sampling_input.num_ignore_eos = _get_num_ignore_eos(seqs)
+        
+        # Always add prompt and output tokens for vllm-style penalties
+        # Use vocab_size from model config, fallback to a reasonable default
+        vocab_size = self.vocab_size or 50000
+        prompt_tokens, output_tokens = _gather_prompt_output_tokens(pad_token_id, seqs, vocab_size)
+        sampling_input.prompt_tokens = prompt_tokens
+        sampling_input.output_tokens = output_tokens
+        
         return sampling_input
 
     def on_session_end(self, session_id: int):
