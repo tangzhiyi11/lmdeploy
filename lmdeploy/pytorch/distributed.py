@@ -451,7 +451,19 @@ def reduce_scatter_by_tp_sizes(out: torch.Tensor, rank: int, tp_sizes: List[int]
     """Reduce scatter."""
     attn_tp = get_dist_manager().current_config().attn_tp
     outs = list(out.split(tp_sizes, -2))
-    outs = [item for item in outs for _ in range(attn_tp)]
+    if attn_tp > 1:
+        outs = [item for item in outs for _ in range(attn_tp)]
     out = outs[rank]
     dist.reduce_scatter(out, outs, group=group)
     return out
+
+
+def reduce_scatter_by_tp_sizes_async(out: torch.Tensor, rank: int, tp_sizes: List[int], group: dist.ProcessGroup):
+    """Reduce scatter (async)."""
+    attn_tp = get_dist_manager().current_config().attn_tp
+    outs = list(out.split(tp_sizes, -2))
+    if attn_tp > 1:
+        outs = [item for item in outs for _ in range(attn_tp)]
+    out = outs[rank]
+    handle = dist.reduce_scatter(out, outs, group=group, async_op=True)
+    return out, handle

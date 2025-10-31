@@ -148,16 +148,20 @@ class MoEForwardDPTP:
 
         # MoE gemm
         cur_out = self.gemm_func(cur_hidden_states, cur_topk_weights, cur_topk_ids)
-        output_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+        #output_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
 
         if use_async_op:
-            _, handle = self.reduce_scatter(cur_out, output_states, tp_sizes, async_op=True)
+            # legacy implementation (kept for reference):
+            # _, handle = self.reduce_scatter(cur_out, output_states, tp_sizes, async_op=True)
+            output_states, handle = dist.reduce_scatter_by_tp_sizes_async(cur_out, self.rank, tp_sizes, group=self.tp_group)
             handle.wait()
         else:
-            hidden_states_list = list(cur_out.split(tp_sizes, -2))
-            hidden_states_list[self.gather_rank] = output_states
-            hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
-            dist.reduce_scatter(output_states, hidden_states_list, group=self.tp_group, async_op=False)
+            # legacy implementation (kept for reference):
+            # hidden_states_list = list(cur_out.split(tp_sizes, -2))
+            # hidden_states_list[self.gather_rank] = output_states
+            # hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
+            # dist.reduce_scatter(output_states, hidden_states_list, group=self.tp_group, async_op=False)
+            output_states = dist.reduce_scatter_by_tp_sizes(cur_out, self.rank, tp_sizes, group=self.tp_group)
         return output_states
 
     def forward(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
@@ -190,14 +194,67 @@ class MoEForwardDPTP:
             cur_topk_ids, topk_ids = __slice_tensor(topk_ids, slice_size)
             cur_output, output_states = __slice_tensor(output_states, slice_size)
 
-            # all gather
-            if use_async_op:
-                cur_hidden_states, cur_topk_weights, cur_topk_ids, handle = self.all_gather(
-                    cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=True)
-            else:
-                cur_hidden_states, cur_topk_weights, cur_topk_ids = self.all_gather(
-                    cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=False)
-                handle = None
+            # legacy implementation (kept for reference):
+            # # all gather
+            # if use_async_op:
+            #     cur_hidden_states, cur_topk_weights, cur_topk_ids, handle = self.all_gather(
+            #         cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=True)
+            # else:
+            #     cur_hidden_states, cur_topk_weights, cur_topk_ids = self.all_gather(
+            #         cur_hidden_states, cur_topk_weights, cur_topk_ids, cur_tp_sizes, async_op=False)
+            #     handle = None
+
+            # broadcast-based multicast to build global tensors
+            total_tokens = sum(cur_tp_sizes)
+            sh = (*cur_hidden_states.shape[:-2], total_tokens, *cur_hidden_states.shape[-1:])
+            sw = (*cur_topk_weights.shape[:-2], total_tokens, *cur_topk_weights.shape[-1:])
+            si = (*cur_topk_ids.shape[:-2], total_tokens, *cur_topk_ids.shape[-1:])
+
+            b_hidden = cur_hidden_states.new_empty(sh)
+            b_weights = cur_topk_weights.new_empty(sw)
+            b_ids = cur_topk_ids.new_empty(si)
+
+            # map gather-group local index -> global rank for broadcast src
+            from lmdeploy.pytorch.distributed import get_world_rank
+            world_size, global_rank = get_world_rank()
+            tp = self.tp
+            attn_tp = self.attn_tp
+            tp_group_id = global_rank // tp
+            group_start = tp_group_id * tp
+            gather_group_id = (global_rank - group_start) % attn_tp
+            g_start = group_start + gather_group_id
+            g_ranks = list(range(world_size))[g_start:(g_start + tp):attn_tp]
+
+            offset = 0
+            handles = []
+            for src_idx, sz in enumerate(cur_tp_sizes):
+                h_slice = b_hidden.narrow(-2, offset, sz)
+                w_slice = b_weights.narrow(-2, offset, sz)
+                i_slice = b_ids.narrow(-2, offset, sz)
+
+                if src_idx == self.gather_rank:
+                    h_slice.copy_(cur_hidden_states)
+                    w_slice.copy_(cur_topk_weights)
+                    i_slice.copy_(cur_topk_ids)
+
+                src_global = g_ranks[src_idx]
+                if use_async_op:
+                    handles.append(dist.broadcast(h_slice, src_global, group=self.gather_group, async_op=True))
+                    handles.append(dist.broadcast(w_slice, src_global, group=self.gather_group, async_op=True))
+                    handles.append(dist.broadcast(i_slice, src_global, group=self.gather_group, async_op=True))
+                else:
+                    dist.broadcast(h_slice, src_global, group=self.gather_group, async_op=False)
+                    dist.broadcast(w_slice, src_global, group=self.gather_group, async_op=False)
+                    dist.broadcast(i_slice, src_global, group=self.gather_group, async_op=False)
+
+                offset += sz
+
+            if use_async_op and handles:
+                for h in handles:
+                    h.wait()
+
+            cur_hidden_states, cur_topk_weights, cur_topk_ids = b_hidden, b_weights, b_ids
+            handle = None
             return dict(hidden_states=cur_hidden_states,
                         topk_weights=cur_topk_weights,
                         topk_ids=cur_topk_ids,
@@ -387,7 +444,7 @@ class FusedMoE(nn.Module):
             device = torch.device('cpu')
         if dtype is None:
             dtype = torch.float16
-        self.init_tp_args(all_reduce, enable_ep)
+        self.init_tp_args(all_reduce, enable_ep, top_k)
 
         impl_builder = get_backend().get_layer_impl_builder(OpType.FusedMoE)
         self.impl = impl_builder.build(top_k, num_experts, renormalize)
@@ -430,7 +487,7 @@ class FusedMoE(nn.Module):
         self.enable_ep = enable_ep
         self.act_func = act_func
 
-    def init_tp_args(self, all_reduce: bool, enable_ep: bool):
+    def init_tp_args(self, all_reduce: bool, enable_ep: bool, top_k):
         """Init tp args."""
         tp, tp_rank = get_tp_world_rank('moe')
         dist_ctx = get_dist_manager().current_context()
@@ -459,7 +516,7 @@ class FusedMoE(nn.Module):
                         moe_type=MoeType.Default,
                     ))['hidden_states']
 
-            self.forward_dptp = MoEForwardDPTP(__gemm_func)
+            self.forward_dptp = MoEForwardDPTP(__gemm_func, top_k)
 
     def update_weights(self):
         """Update weights."""

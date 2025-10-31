@@ -12,8 +12,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch_npu
 from torch.profiler import ProfilerActivity, profile, record_function
+
+import torch_npu
+from torch_npu.profiler import profile as npu_profile
 
 from lmdeploy.pytorch.disagg.config import EngineRole
 from lmdeploy.serve.openai.protocol import UpdateParamsRequest
@@ -142,13 +144,16 @@ class AgentProfiler:
         from lmdeploy.pytorch import envs
         activities = []
         if envs.torch_profile_cpu:
-            activities.append(ProfilerActivity.CPU)
+            # activities.append(ProfilerActivity.CPU)
+            activities.append(torch_npu.profiler.ProfilerActivity.CPU)
         if envs.torch_profile_cuda:
-            activities.append(ProfilerActivity.CUDA)
+            # activities.append(ProfilerActivity.CUDA)
+            activities.append(torch_npu.profiler.ProfilerActivity.NPU)
         if len(activities) > 0:
             logger.warning(f'Profiler start on {self.name}. '
                            'Please Note that profiling might harm performance.')
-            profiler = profile(activities=activities)
+            # profiler = profile(activities=activities)
+            profiler = npu_profile(activities=activities)
             return profiler
         else:
             return None
@@ -165,7 +170,9 @@ class AgentProfiler:
         try:
             self.profiler.stop()
             rank = self.rank if self.dp == 1 else self.dp_rank
-            dump_path = f'{self.prefix}{rank}.json'
+            tp_rank = self.rank
+            dp_rank = self.dp_rank if self.dp != 1 else 0
+            dump_path = f'{self.prefix}{dp_rank}_{tp_rank}.json'
             self.profiler.export_chrome_trace(dump_path)
             logger.warning(f'Profiler {self.name} dump to {dump_path}.')
         except Exception as e:
