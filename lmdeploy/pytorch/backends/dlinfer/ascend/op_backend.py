@@ -269,12 +269,13 @@ class AscendOpsBackend(DlinferOpsBackend):
     def build_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
                            backend_config: BackendConfig, device: torch.device):
         """Build graph runner."""
-        """From .graph_runner import AscendGraphRunner ascend_graph_runner =
-        AscendGraphRunner(model, model_config, cache_config, backend_config,
-        device) AscendOpsBackend.enable_graph =
-        ascend_graph_runner.enable_graph return ascend_graph_runner."""
-        from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
-        return CUDAGraphRunner(model, model_config, cache_config, backend_config, device)
+        # 使用 get_graph_runner 工厂函数来支持不同的 graph 模式
+        from .graph_runner import get_graph_runner
+        graph_runner = get_graph_runner(model, model_config, cache_config, backend_config, device)
+        # 设置 enable_graph 标志
+        if hasattr(graph_runner, 'enable_graph'):
+            AscendOpsBackend.enable_graph = graph_runner.enable_graph
+        return graph_runner
 
     @staticmethod
     def init():

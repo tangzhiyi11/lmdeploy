@@ -126,3 +126,57 @@ class AscendGraphRunner(GraphRunner):
         """Capture batch sizes."""
         # TODO: disable warmup now.
         return []
+
+
+def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
+                     backend_config: BackendConfig, device: torch.device):
+    """
+    Graph Runner工厂函数
+    
+    根据环境变量 DLINFER_ASCEND_GRAPH_MODE 选择：
+    - 'full' (默认): 现有的全图模式（AscendGraphRunner，使用 ACL Graph）
+    - 'piecewise': 新的piecewise模式（AscendPiecewiseGraphRunner）
+    
+    使用方式：
+        export DLINFER_ASCEND_GRAPH_MODE=piecewise  # 使用 piecewise 模式
+        export DLINFER_ASCEND_GRAPH_MODE=full       # 使用 full 模式（默认）
+    """
+    import os
+    
+    # 从环境变量读取模式，默认为 'full'
+    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'full').lower()
+    
+    logger.info(f"Creating graph runner with mode: {graph_mode} (from env DLINFER_ASCEND_GRAPH_MODE)")
+    
+    if graph_mode == 'piecewise':
+        # 使用piecewise模式
+        try:
+            from dlinfer.framework.lmdeploy_ext.cudagraph.ascend_piecewise_runner import (
+                AscendPiecewiseGraphRunner
+            )
+            logger.info("Using Ascend Piecewise Graph mode")
+            return AscendPiecewiseGraphRunner(
+                model, model_config, cache_config, backend_config, device
+            )
+        except ImportError as e:
+            logger.error(f"Failed to import AscendPiecewiseGraphRunner: {e}")
+            logger.warning("Falling back to full graph mode")
+            # 回退到全图模式
+            graph_mode = 'full'
+        except Exception as e:
+            logger.error(f"Error initializing Piecewise mode: {e}")
+            logger.warning("Falling back to full graph mode")
+            graph_mode = 'full'
+    
+    if graph_mode == 'full':
+        # 使用现有的全图模式（ACL Graph）
+        logger.info("Using Ascend Full Graph mode (ACL Graph)")
+        return AscendGraphRunner(
+            model, model_config, cache_config, backend_config, device
+        )
+    
+    # 未知模式，使用默认 full 模式
+    logger.warning(f"Unknown graph_mode '{graph_mode}', using 'full' mode")
+    return AscendGraphRunner(
+        model, model_config, cache_config, backend_config, device
+    )
