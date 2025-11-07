@@ -268,6 +268,41 @@ class Qwen3model(nn.Module):
                 attn_metadata=attn_metadata,
             )
 
+        # residual = None
+        # idx = 0
+        # decoder_layer = self.layers[idx]
+        # past_key_value = past_key_values[idx]
+        # hidden_states, residual = decoder_layer(
+        #     hidden_states,
+        #     rotary_pos_emb=rotary_pos_emb,
+        #     past_key_value=past_key_value,
+        #     residual=residual,
+        #     attn_metadata=attn_metadata,
+        # )
+
+        # idx = 1
+        # decoder_layer = self.layers[idx]
+        # past_key_value = past_key_values[idx]
+        # hidden_states, residual = decoder_layer(
+        #     hidden_states,
+        #     rotary_pos_emb=rotary_pos_emb,
+        #     past_key_value=past_key_value,
+        #     residual=residual,
+        #     attn_metadata=attn_metadata,
+        # )
+
+        # idx = 2
+        # decoder_layer = self.layers[idx]
+        # past_key_value = past_key_values[idx]
+        # hidden_states, residual = decoder_layer(
+        #     hidden_states,
+        #     rotary_pos_emb=rotary_pos_emb,
+        #     past_key_value=past_key_value,
+        #     residual=residual,
+        #     attn_metadata=attn_metadata,
+        # )
+
+
         # norm
         hidden_states, _ = self.norm(hidden_states, residual)
 

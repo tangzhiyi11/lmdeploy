@@ -3,6 +3,8 @@ import warnings
 from importlib import import_module
 from typing import List
 
+import os
+
 import torch
 import torch.distributed
 import torch_npu
@@ -151,32 +153,27 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
     if graph_mode == 'piecewise':
         # 使用piecewise模式
         try:
-            from dlinfer.framework.lmdeploy_ext.cudagraph.ascend_piecewise_runner import (
+            from dlinfer.graph.compilation.ascend_piecewise_runner import (
                 AscendPiecewiseGraphRunner
             )
             logger.info("Using Ascend Piecewise Graph mode")
             return AscendPiecewiseGraphRunner(
                 model, model_config, cache_config, backend_config, device
             )
-        except ImportError as e:
-            logger.error(f"Failed to import AscendPiecewiseGraphRunner: {e}")
-            logger.warning("Falling back to full graph mode")
-            # 回退到全图模式
-            graph_mode = 'full'
         except Exception as e:
-            logger.error(f"Error initializing Piecewise mode: {e}")
-            logger.warning("Falling back to full graph mode")
-            graph_mode = 'full'
-    
+            import pdb;pdb.set_trace()
+            raise RuntimeError(f'### new graph failed, {e}')
+
     if graph_mode == 'full':
         # 使用现有的全图模式（ACL Graph）
         logger.info("Using Ascend Full Graph mode (ACL Graph)")
-        return AscendGraphRunner(
+        from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
+        return CUDAGraphRunner(
             model, model_config, cache_config, backend_config, device
         )
     
-    # 未知模式，使用默认 full 模式
-    logger.warning(f"Unknown graph_mode '{graph_mode}', using 'full' mode")
+    # 未知模式，使用默认 atb 模式
+    logger.warning(f"Unknown graph_mode '{graph_mode}', using 'atb' graph mode")
     return AscendGraphRunner(
         model, model_config, cache_config, backend_config, device
     )
