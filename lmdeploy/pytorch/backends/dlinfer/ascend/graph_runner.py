@@ -153,7 +153,7 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
     if graph_mode == 'piecewise':
         # 使用piecewise模式
         try:
-            from dlinfer.graph.compilation.ascend_piecewise_runner import (
+            from dlinfer.graph.ascend_piecewise.ascend_piecewise_runner import (
                 AscendPiecewiseGraphRunner
             )
             logger.info("Using Ascend Piecewise Graph mode")
@@ -161,7 +161,6 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
                 model, model_config, cache_config, backend_config, device
             )
         except Exception as e:
-            import pdb;pdb.set_trace()
             raise RuntimeError(f'### new graph failed, {e}')
 
     if graph_mode == 'full':
