@@ -321,8 +321,11 @@ class AscendOpsBackend(DlinferOpsBackend):
                            backend_config: BackendConfig, device: torch.device):
         """Build graph runner."""
         if AscendOpsBackend.enable_aclgraph():
-            from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
-            return CUDAGraphRunner(model, model_config, cache_config, backend_config, device)
+            from .graph_runner import get_graph_runner
+            graph_runner = get_graph_runner(model, model_config, cache_config, backend_config, device)
+            if hasattr(graph_runner, 'enable_graph'):
+                AscendOpsBackend.enable_graph = graph_runner.enable_graph
+            return graph_runner
         else:
             from .graph_runner import AscendGraphRunner
             ascend_graph_runner = AscendGraphRunner(model, model_config, cache_config, backend_config, device)

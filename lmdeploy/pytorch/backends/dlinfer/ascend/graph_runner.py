@@ -126,3 +126,50 @@ class AscendGraphRunner(GraphRunner):
         """Capture batch sizes."""
         # TODO: disable warmup now.
         return []
+
+def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
+                     backend_config: BackendConfig, device: torch.device):
+    """
+    Graph Runner factory function
+    
+    Select based on environment variable DLINFER_ASCEND_GRAPH_MODE:
+    - 'full': Existing full graph mode (patched CudaGraphRunner, using ACL Graph)
+    - 'piecewise' (default): New piecewise mode (AscendPiecewiseGraphRunner)
+    
+    Usage:
+        export DLINFER_ASCEND_GRAPH_MODE=piecewise  # Use piecewise mode (default)
+        export DLINFER_ASCEND_GRAPH_MODE=full       # Use full mode
+    """
+    import os
+    
+    # Read mode from environment variable, default is 'piecewise'
+    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'piecewise').lower()
+    
+    logger.info(f"Creating graph runner with mode: {graph_mode} (from env DLINFER_ASCEND_GRAPH_MODE)")
+    
+    if graph_mode == 'piecewise':
+        # Use piecewise mode
+        try:
+            from dlinfer.graph.ascend_piecewise.ascend_piecewise_runner import (
+                AscendPiecewiseGraphRunner
+            )
+            logger.info("Using Ascend Piecewise Graph mode")
+            print("########### Using Ascend Piecewise Graph mode")
+            return AscendPiecewiseGraphRunner(
+                model, model_config, cache_config, backend_config, device
+            )
+        except Exception as e:
+            raise RuntimeError(f'### new graph failed, {e}')
+
+    if graph_mode == 'full':
+        logger.info("Using Ascend Full Graph mode (ACL Graph)")
+        from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
+        return CUDAGraphRunner(
+            model, model_config, cache_config, backend_config, device
+        )
+    
+    # use default atb mode
+    logger.warning(f"Unknown graph_mode '{graph_mode}', using 'atb' graph mode")
+    return AscendGraphRunner(
+        model, model_config, cache_config, backend_config, device
+    )

@@ -18,6 +18,7 @@ class DlinferAttentionMetadata(AttentionMetadata):
     max_kv_seq_len: int = 1
     quant_meta: Dict = None
     cu_seq_lens_kv: Optional[Tensor] = None
+    attn_output_buffer: Optional[Tensor] = None
 
 
 class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
@@ -109,7 +110,9 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
                                               v_scales_zeros=v_scales_zeros,
                                               quant_bits=quant_bits)
 
-        if inplace:
+        if attn_metadata.is_decoding and attn_metadata.attn_output_buffer is not None:
+            attn_output = attn_metadata.attn_output_buffer
+        elif inplace:
             attn_output = query[..., :self.v_head_size]
         else:
             q_shape = query.shape
