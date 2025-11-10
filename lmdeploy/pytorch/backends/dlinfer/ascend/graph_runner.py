@@ -157,6 +157,7 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
                 AscendPiecewiseGraphRunner
             )
             logger.info("Using Ascend Piecewise Graph mode")
+            print("########### Using Ascend Piecewise Graph mode")
             return AscendPiecewiseGraphRunner(
                 model, model_config, cache_config, backend_config, device
             )
