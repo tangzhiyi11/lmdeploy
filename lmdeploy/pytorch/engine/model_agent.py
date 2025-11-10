@@ -423,7 +423,6 @@ class BaseModelAgent:
             capture_batch_sizes = self.patched_model.get_capture_batch_sizes()
             capture_batch_sizes = sorted(capture_batch_sizes, reverse=True)
             # logger.error(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}')
-            print(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}', flush=True)
             for num_tokens in capture_batch_sizes:
                 inputs = self.inputs_strategy.make_dummy(num_tokens,
                                                          is_decoding=True,
@@ -438,7 +437,7 @@ class BaseModelAgent:
                 # logger.error(f'Warmup decoding num_tokens={num_tokens} done.')
                 # logger.error(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}')
                 print(f'Warmup decoding num_tokens={num_tokens} done.', flush=True)
-                print(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}', flush=True)
+                # print(f'ffffffffffffrrrrrrrrrrrreeeeeeeeeeeee: {torch.npu.mem_get_info(0)}', flush=True)
 
     def _slice_outs(self, inputs: torch.Tensor, seq_length: torch.LongTensor):
         """Slice outputs."""

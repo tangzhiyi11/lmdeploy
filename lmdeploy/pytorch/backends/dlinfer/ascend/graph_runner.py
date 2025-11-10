@@ -146,7 +146,7 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
     import os
     
     # 从环境变量读取模式，默认为 'full'
-    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'full').lower()
+    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'piecewise').lower()
     
     logger.info(f"Creating graph runner with mode: {graph_mode} (from env DLINFER_ASCEND_GRAPH_MODE)")
     
