@@ -211,7 +211,7 @@ class AscendOpsBackend(DlinferOpsBackend):
         elif is_unpaged_prefill:
             # prepare some params of unpaged_prefill attention stage.
             q_start_loc_cpu, kv_seqlens_cpu = None, None
-            q_seqlens_cpu = step_context.q_seqlens.cpu()
+            q_seqlens_cpu = step_context.q_seqlens.cpu().int()
             if SocVersion.is_Ascend910():
                 single_attention_mask = torch.logical_not(
                     torch.tril(
