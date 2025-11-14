@@ -447,6 +447,54 @@ def gather_by_tp_sizes(x: torch.Tensor,
     return new_x
 
 
+def gather_varlen_by_tp_sizes(x: torch.Tensor,
+                              tp_sizes: List[int],
+                              group: Optional[dist.ProcessGroup] = None,
+                              async_op: bool = False):
+    """Gather inputs when token counts differ across ranks."""
+    local_len = x.shape[-2]
+    max_len = max(tp_sizes)
+    if local_len > max_len:
+        raise RuntimeError(
+            f"gather_varlen_by_tp_sizes invalid input: local_len {local_len} exceeds max tp size {max_len}"
+        )
+
+    if local_len < max_len:
+        pad_shape = (*x.shape[:-2], max_len - local_len, *x.shape[-1:])
+        padding = x.new_zeros(pad_shape)
+        padded_x = torch.cat([x, padding], dim=-2)
+    else:
+        padded_x = x
+
+    chunk_shape = (*x.shape[:-2], max_len, *x.shape[-1:])
+    gather_list = [x.new_empty(chunk_shape) for _ in tp_sizes]
+    work = dist.all_gather(gather_list, padded_x, group=group, async_op=True)
+
+    result_shape = (*x.shape[:-2], sum(tp_sizes), *x.shape[-1:])
+    result = x.new_empty(result_shape)
+
+    def _copy_chunks():
+        offset = 0
+        for chunk, size in zip(gather_list, tp_sizes):
+            result.narrow(-2, offset, size).copy_(chunk.narrow(-2, 0, size))
+            offset += size
+        return result
+
+    if async_op:
+        class _VarlenGatherHandle:
+            def __init__(self, work: Work):
+                self.work = work
+
+            def wait(self):
+                self.work.wait()
+                return _copy_chunks()
+
+        return result, _VarlenGatherHandle(work)
+
+    work.wait()
+    return _copy_chunks()
+
+
 def reduce_scatter_by_tp_sizes(out: torch.Tensor, rank: int, tp_sizes: List[int], group: dist.ProcessGroup):
     """Reduce scatter."""
     attn_tp = get_dist_manager().current_config().attn_tp

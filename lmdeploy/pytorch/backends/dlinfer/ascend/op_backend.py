@@ -93,6 +93,7 @@ class AscendOpsBackend(DlinferOpsBackend):
     enable_graph = False
     half_negative_inf = torch.finfo(torch.float16).min
     total_slots = None
+    is_decoding = False
 
     @staticmethod
     def get_name() -> str:
@@ -158,6 +159,8 @@ class AscendOpsBackend(DlinferOpsBackend):
 
         max_q_seq_len, max_kv_seq_len = 0, 0
         if step_context.is_decoding:
+            cls.is_decoding = True
+
             # collect kv_start_indices without using a for-loop,
             # (fill kv-cache for just ONE token during the decoding phase)
 
@@ -166,6 +169,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             last_block = step_context.block_offsets.gather(1, block_num.view(-1, 1)).view(-1)
             kv_start_indices = last_block * block_size + idx
         else:
+            cls.is_decoding = False
             q_seqlens_list = step_context.q_seqlens.tolist()
             kv_seqlens_list = step_context.kv_seqlens.tolist()
             max_q_seq_len = max(q_seqlens_list)

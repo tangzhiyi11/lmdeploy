@@ -6,8 +6,8 @@ import torch.distributed as dist
 from torch import nn
 
 from lmdeploy.pytorch.config import TPMode
-from lmdeploy.pytorch.distributed import (gather_by_tp_sizes, get_dist_group, get_dist_manager, get_tp_world_rank,
-                                          reduce_scatter_by_tp_sizes)
+from lmdeploy.pytorch.distributed import (gather_by_tp_sizes, gather_varlen_by_tp_sizes, get_dist_group,
+                                          get_dist_manager, get_tp_world_rank, reduce_scatter_by_tp_sizes)
 from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 
 from .utils import update_tp_args
@@ -32,8 +32,10 @@ class LinearForwardDPTP:
 
     def all_gather(self, hidden_states: torch.Tensor, tp_sizes: List[int]):
         """All gather."""
-        hidden_states, handle = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
-        return hidden_states, handle
+        return gather_varlen_by_tp_sizes(hidden_states,
+                                         tp_sizes,
+                                         group=self.gather_group,
+                                         async_op=True)
 
     def reduce_scatter(self, hidden_states: torch.Tensor, out_states: torch.Tensor, tp_sizes: List[int]):
         """Reduce scatter."""

@@ -2,6 +2,7 @@
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
+import torch._dynamo as dynamo
 
 import torch
 from torch import nn
@@ -85,54 +86,82 @@ class MoEForwardDPTP:
         # self.max_tokens_per_round = max_tokens_per_round * self.attn_tp // self.tp // 2
         self.max_tokens_per_round = max_tokens_per_round * self.attn_tp // self.tp
 
-    def all_gather(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                   tp_sizes: List[int], async_op=True):
-        """All gather."""
-        if async_op:
-            hidden_states, _ = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
-            topk_weights, _ = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=True)
-            topk_ids, handle = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=True)
-            return hidden_states, topk_weights, topk_ids, handle
-        else:
-            hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
-            topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=False)
-            topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=False)
-            return hidden_states, topk_weights, topk_ids
+    # def all_gather(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    #                tp_sizes: List[int], async_op=True):
+    #     """All gather."""
+    #     if async_op:
+    #         hidden_states, _ = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
+    #         topk_weights, _ = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=True)
+    #         topk_ids, handle = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=True)
+    #         return hidden_states, topk_weights, topk_ids, handle
+    #     else:
+    #         hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
+    #         topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=False)
+    #         topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=False)
+    #         return hidden_states, topk_weights, topk_ids
 
 
-    def reduce_scatter(self, hidden_states: torch.Tensor, out_states: torch.Tensor, tp_sizes: List[int], async_op=True):
-        """Reduce scatter."""
-        if async_op:
-            hidden_states_list = list(hidden_states.split(tp_sizes, -2))
-            hidden_states_list[self.gather_rank] = out_states
-            hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
-            handle = dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=True)
-            return out_states, handle
-        else:
-            hidden_states_list = list(hidden_states.split(tp_sizes, -2))
-            hidden_states_list[self.gather_rank] = out_states
-            hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
-            dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=False)
-            return out_states
+    # def reduce_scatter(self, hidden_states: torch.Tensor, out_states: torch.Tensor, tp_sizes: List[int], async_op=True):
+    #     """Reduce scatter."""
+    #     if async_op:
+    #         hidden_states_list = list(hidden_states.split(tp_sizes, -2))
+    #         hidden_states_list[self.gather_rank] = out_states
+    #         hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
+    #         handle = dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=True)
+    #         return out_states, handle
+    #     else:
+    #         hidden_states_list = list(hidden_states.split(tp_sizes, -2))
+    #         hidden_states_list[self.gather_rank] = out_states
+    #         hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
+    #         dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=False)
+    #         return out_states
 
-    def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                                 output_states: torch.Tensor, tp_sizes: List[int], handle: dist.Work, async_op=True):
-        """Gemm and reduce scatter."""
-        if async_op:
-            handle.wait()
-            cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
-            cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
-            output_states.copy_(cur_out_states)
-            return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
-        else:
-            cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
-            cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
-            output_states.copy_(cur_out_states)
-            return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
+    # def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    #                              output_states: torch.Tensor, tp_sizes: List[int], handle: dist.Work, async_op=True):
+    #     """Gemm and reduce scatter."""
+    #     if async_op:
+    #         handle.wait()
+    #         cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
+    #         cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+    #         output_states.copy_(cur_out_states)
+    #         return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
+    #     else:
+    #         cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
+    #         cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+    #         output_states.copy_(cur_out_states)
+    #         return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
 
     def forward_decode(self, step_ctx, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor, use_async_op=False):
         """forward."""
         tp_sizes = step_ctx.dp_meta.moe_tp_sizes
+        local_tokens = hidden_states.shape[-2]
+        router_tokens = router_logits.shape[-2]
+        expected_tokens = tp_sizes[self.gather_rank] if tp_sizes else None
+        if (not dynamo.is_compiling()) and _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "[MoEDecode] rank=%s local_tokens=%s router_tokens=%s expected_tokens=%s tp_sizes=%s",
+                self.gather_rank,
+                local_tokens,
+                router_tokens,
+                expected_tokens,
+                tp_sizes,
+            )
+        if expected_tokens is None:
+            raise RuntimeError("MoE decode missing tp_sizes in step context")
+        if local_tokens != expected_tokens or router_tokens != expected_tokens:
+            if not dynamo.is_compiling():
+                _LOGGER.warning(
+                    "[MoEDecode] rank=%s tensor length mismatch local=%s router=%s expected=%s tp_sizes=%s",
+                    self.gather_rank,
+                    local_tokens,
+                    router_tokens,
+                    expected_tokens,
+                    tp_sizes,
+                )
+            raise RuntimeError(
+                f"MoE decode tensor length mismatch (rank={self.gather_rank}): "
+                f"local={local_tokens}, router={router_tokens}, expected={expected_tokens}, tp_sizes={tp_sizes}"
+            )
 
         # pre
         if use_async_op:
@@ -288,6 +317,163 @@ class MoEForwardDPTP:
         else:
             self._gemm_and_reduce_scatter(**cur_inputs)
             return return_states
+
+
+    def all_gather(self, hidden_states: torch.Tensor, router_logits: torch.Tensor,
+                   tp_sizes: List[int], async_op=True):
+        """All gather."""
+        if async_op:
+            hidden_states, _ = dist.gather_varlen_by_tp_sizes(hidden_states,
+                                                              tp_sizes,
+                                                              group=self.gather_group,
+                                                              async_op=True)
+            router_logits, handle = dist.gather_varlen_by_tp_sizes(router_logits,
+                                                                   tp_sizes,
+                                                                   group=self.gather_group,
+                                                                   async_op=True)
+            return hidden_states, router_logits, handle
+        else:
+            hidden_states = dist.gather_varlen_by_tp_sizes(hidden_states,
+                                                           tp_sizes,
+                                                           group=self.gather_group,
+                                                           async_op=False)
+            router_logits = dist.gather_varlen_by_tp_sizes(router_logits,
+                                                           tp_sizes,
+                                                           group=self.gather_group,
+                                                           async_op=False)
+            return hidden_states, router_logits
+
+    def reduce_scatter(self, hidden_states: torch.Tensor, out_states: torch.Tensor, tp_sizes: List[int], async_op=True):
+        """Reduce scatter."""
+        hidden_states_list = list(hidden_states.split(tp_sizes, -2))
+        hidden_states_list[self.gather_rank] = out_states
+        hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
+        if async_op:
+            handle = dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=True)
+            return out_states, handle
+        else:
+            return dist.reduce_scatter(out_states, hidden_states_list, group=self.tp_group, async_op=False)
+
+    def _gemm_and_reduce_scatter(self, hidden_states: torch.Tensor, router_logits: torch.Tensor,
+                                 output_states: torch.Tensor, tp_sizes: List[int], handle: dist.Work, async_op=True):
+        """Gemm and reduce scatter."""
+        # handle.wait()
+        topk_weights, topk_ids = self.softmax_topk(router_logits)
+        cur_out = self.gemm_func(hidden_states, topk_weights, topk_ids)
+        
+        if async_op:
+            handle.wait()
+            cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+            output_states.copy_(cur_out_states)
+            return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
+        else:
+            cur_out_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+            output_states.copy_(cur_out_states)
+            return self.reduce_scatter(cur_out, output_states, tp_sizes, async_op)
+
+    def forward_decode_with_router_logits(self, step_ctx, hidden_states: torch.Tensor, router_logits: torch.Tensor, use_async_op=False):
+        """forward."""
+        tp_sizes = step_ctx.dp_meta.moe_tp_sizes
+
+        # pre
+        if use_async_op:
+            cur_hidden_states, _ = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=True)
+            cur_router_logits, handle = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=True)
+            handle.wait()
+        else:
+            cur_hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
+            cur_router_logits = dist.gather_by_tp_sizes(router_logits, tp_sizes, group=self.gather_group, async_op=False)
+
+        cur_topk_weights, cur_topk_ids = self.softmax_topk(cur_router_logits)
+
+        # MoE gemm
+        cur_out = self.gemm_func(cur_hidden_states, cur_topk_weights, cur_topk_ids)
+        #output_states = cur_out.split(tp_sizes, dim=0)[self.gather_rank]
+
+        if use_async_op:
+            # legacy implementation (kept for reference):
+            # _, handle = self.reduce_scatter(cur_out, output_states, tp_sizes, async_op=True)
+            output_states, handle = dist.reduce_scatter_by_tp_sizes_async(cur_out, self.rank, tp_sizes, group=self.tp_group)
+            handle.wait()
+        else:
+            # legacy implementation (kept for reference):
+            # hidden_states_list = list(cur_out.split(tp_sizes, -2))
+            # hidden_states_list[self.gather_rank] = output_states
+            # hidden_states_list = [item for item in hidden_states_list for _ in range(self.attn_tp)]
+            # dist.reduce_scatter(output_states, hidden_states_list, group=self.tp_group, async_op=False)
+            output_states = dist.reduce_scatter_by_tp_sizes(cur_out, self.rank, tp_sizes, group=self.tp_group)
+        return output_states
+
+
+    def forward_with_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        """forward."""
+
+        use_async_op = False
+        step_ctx = get_step_ctx_manager().current_context()
+
+        if step_ctx.is_decoding:
+            # print(f'############################## go to forward_decode!!!!!!!!!!!!!!!!!')
+            return self.forward_decode_with_router_logits(step_ctx, hidden_states, router_logits, use_async_op)
+
+        # return hidden_states
+
+        def __slice_tensor(tensor: torch.Tensor, slice_size: int):
+            """Slice tensor."""
+            cur_tensor = tensor[:slice_size]
+            tensor = tensor[slice_size:]
+            return cur_tensor, tensor
+
+        def __slice_and_gather():
+            """Slice and gather."""
+            nonlocal hidden_states, router_logits, tp_sizes, output_states
+            cur_tp_sizes = tp_sizes.minimum(max_tokens_per_round)
+            tp_sizes -= cur_tp_sizes
+            cur_tp_sizes = cur_tp_sizes.tolist()
+
+            slice_size = cur_tp_sizes[self.gather_rank]
+            cur_hidden_states, hidden_states = __slice_tensor(hidden_states, slice_size)
+            cur_router_logits, router_logits = __slice_tensor(router_logits, slice_size)
+            cur_output, output_states = __slice_tensor(output_states, slice_size)
+
+            # all gather
+            if use_async_op:
+                cur_hidden_states, cur_router_logits, handle = self.all_gather(
+                    cur_hidden_states, cur_router_logits, cur_tp_sizes, async_op=True)
+            else:
+                cur_hidden_states, cur_router_logits = self.all_gather(
+                    cur_hidden_states, cur_router_logits, cur_tp_sizes, async_op=False)
+                handle = None
+            return dict(hidden_states=cur_hidden_states,
+                        router_logits=cur_router_logits,
+                        output_states=cur_output,
+                        handle=handle,
+                        tp_sizes=cur_tp_sizes,
+                        async_op=use_async_op)
+
+        step_ctx = get_step_ctx_manager().current_context()
+        tp_sizes = step_ctx.dp_meta.moe_tp_sizes
+        tp_sizes = torch.tensor(tp_sizes)
+        max_tokens_per_round = tp_sizes.new_tensor(self.max_tokens_per_round)
+
+        output_states = torch.empty_like(hidden_states)
+        return_states = output_states
+
+        # pre
+        cur_inputs = __slice_and_gather()
+
+        # main loop
+        while tp_sizes.sum() > 0:
+            next_inputs = __slice_and_gather()
+            self._gemm_and_reduce_scatter(**cur_inputs)
+            cur_inputs = next_inputs
+
+        # post
+        if use_async_op:
+            _, handle = self._gemm_and_reduce_scatter(**cur_inputs)
+            handle.wait()
+        else:
+            self._gemm_and_reduce_scatter(**cur_inputs)
+        return return_states
 
 
 class LinearWeights(nn.Module):
@@ -565,6 +751,10 @@ class FusedMoE(nn.Module):
         if self.tp > 1 and self.tp_mode == TPMode.DP_TP:
             return self.forward_dptp.forward(hidden_states, topk_weights, topk_ids)
         return self.forward_default(hidden_states, topk_weights, topk_ids)
+
+    def forward_with_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        """forward."""
+        return self.forward_dptp.forward_with_router_logits(hidden_states, router_logits)
 
 
 class LinearWeightsW8A8(LinearWeights):

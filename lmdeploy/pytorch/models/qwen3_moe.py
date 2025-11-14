@@ -198,7 +198,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             is_tp=False,
         )
 
-        self.softmax_topk = SoftmaxTopK(self.top_k)
+        # self.softmax_topk = SoftmaxTopK(self.top_k)
 
         if get_dist_manager().current_context().dist_config.enable_eplb:
             dist_ctx = get_dist_manager().current_context()
@@ -224,17 +224,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         """forward."""
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        
         router_logits = self.gate(hidden_states)
-        topk_weights, topk_ids = self.softmax_topk(router_logits)
-        if get_dist_manager().current_context().dist_config.enable_eplb:
-            topk_ids = EPLBManager.topk_ids_logical_to_physical(topk_ids, self.eplb_dispatch_info)
-        out_states = self.experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-        )
+        out_states = self.experts.forward_with_router_logits(hidden_states, router_logits)
 
+        # Release intermediate tensors to free memory
+        del hidden_states, router_logits
+        
         out_states = out_states.reshape(batch_size, sequence_length, -1)
+        
         return out_states
 
 
