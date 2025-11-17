@@ -236,7 +236,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             attention_mask = [torch.cat([mask for mask in attention_mask])]
 
         if step_context.is_decoding:
-            kv_seqlens_cpu = step_context.kv_seqlens  #.cpu()
+            kv_seqlens_cpu = step_context.kv_seqlens.int()  #.cpu()
         elif is_unpaged_prefill:
             pass
         else:
