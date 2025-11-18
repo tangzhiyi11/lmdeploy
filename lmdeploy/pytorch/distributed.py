@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import List, Optional
 import os
-import logging
 
 import torch
 from torch import distributed as dist
@@ -14,7 +13,6 @@ from torch.distributed import _functional_collectives as funcol
 
 from .config import DistConfig, TPMode
 
-_LOGGER = logging.getLogger("lmdeploy.dist")
 
 @dataclass
 class DistGroup:
