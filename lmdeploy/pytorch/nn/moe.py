@@ -2,7 +2,6 @@
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
-import logging
 import os
 import torch._dynamo as dynamo
 
@@ -15,11 +14,8 @@ from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, ge
 from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 
 from ..backends import OpType, get_backend
-from ..utils import get_logger
 from .quant_utils import quant_blocked_fp8
 from .utils import div_up
-
-_LOGGER = get_logger("lmdeploy.moe")
 
 
 class MoeType(Enum):
