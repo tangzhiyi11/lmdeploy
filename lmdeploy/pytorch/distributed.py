@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import List, Optional
+import os
 
 import torch
 from torch import distributed as dist
