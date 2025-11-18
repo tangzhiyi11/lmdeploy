@@ -386,9 +386,12 @@ class MoEForwardDPTP:
         """forward."""
         tp_sizes = step_ctx.dp_meta.moe_tp_sizes
         if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1" and not dynamo.is_compiling():
-            print(
-                f"[MoEDecodeGather] rank={self.gather_rank} hidden_shape={tuple(hidden_states.shape)} "
-                f"router_shape={tuple(router_logits.shape)} tp_sizes={tp_sizes}"
+            logging.getLogger("lmdeploy.moe").info(
+                "[MoEDecodeGather] rank=%s hidden_shape=%s router_shape=%s tp_sizes=%s",
+                self.gather_rank,
+                tuple(hidden_states.shape),
+                tuple(router_logits.shape),
+                tp_sizes,
             )
 
         # pre
