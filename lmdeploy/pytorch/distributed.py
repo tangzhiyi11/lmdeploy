@@ -443,6 +443,10 @@ def gather_by_tp_sizes(x: torch.Tensor,
     shape = (*x.shape[:-2], sum(tp_sizes), *x.shape[-1:])
     new_x = x.new_empty(shape)
     split_new_x = list(new_x.split(tp_sizes, -2))
+    if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1":
+        print(
+            f"[GatherByTpSizes] shape={tuple(x.shape)} sum_tp={sum(tp_sizes)} tp_sizes={tp_sizes} "
+            f"group={getattr(group, 'group_name', 'unknown')} async={async_op}")
     handle = dist.all_gather(split_new_x, x, group=group, async_op=async_op)
     if async_op:
         return new_x, handle
