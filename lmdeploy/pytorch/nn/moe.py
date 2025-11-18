@@ -2,6 +2,7 @@
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
+import logging
 import os
 import torch._dynamo as dynamo
 
@@ -16,6 +17,8 @@ from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 from ..backends import OpType, get_backend
 from .quant_utils import quant_blocked_fp8
 from .utils import div_up
+
+_LOGGER = logging.getLogger("lmdeploy.moe")
 
 
 class MoeType(Enum):
@@ -160,7 +163,7 @@ class MoEForwardDPTP:
                     tp_sizes,
                 )
                 if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1":
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "[MoEDecode] capture_debug local_shape=%s router_shape=%s hidden_head=%s",
                         tuple(hidden_states.shape),
                         tuple(router_logits.shape),
