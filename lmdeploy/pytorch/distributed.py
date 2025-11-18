@@ -441,6 +441,15 @@ def gather_by_tp_sizes(x: torch.Tensor,
     shape = (*x.shape[:-2], sum(tp_sizes), *x.shape[-1:])
     new_x = x.new_empty(shape)
     split_new_x = list(new_x.split(tp_sizes, -2))
+    if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1":
+        _LOGGER.info(
+            "[GatherByTpSizes] rank_shape=%s sum_tp=%s tp_sizes=%s group=%s async=%s",
+            tuple(x.shape),
+            sum(tp_sizes),
+            tp_sizes,
+            getattr(group, "group_name", "unknown"),
+            async_op,
+        )
     handle = dist.all_gather(split_new_x, x, group=group, async_op=async_op)
     if async_op:
         return new_x, handle
