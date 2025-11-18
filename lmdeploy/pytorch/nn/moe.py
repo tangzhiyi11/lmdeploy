@@ -385,6 +385,11 @@ class MoEForwardDPTP:
     def forward_decode_with_router_logits(self, step_ctx, hidden_states: torch.Tensor, router_logits: torch.Tensor, use_async_op=False):
         """forward."""
         tp_sizes = step_ctx.dp_meta.moe_tp_sizes
+        if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1" and not dynamo.is_compiling():
+            print(
+                f"[MoEDecodeGather] rank={self.gather_rank} hidden_shape={tuple(hidden_states.shape)} "
+                f"router_shape={tuple(router_logits.shape)} tp_sizes={tp_sizes}"
+            )
 
         # pre
         if use_async_op:
