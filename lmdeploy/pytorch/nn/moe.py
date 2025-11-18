@@ -2,6 +2,8 @@
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
+import logging
+import os
 import torch._dynamo as dynamo
 
 import torch
@@ -13,8 +15,11 @@ from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, ge
 from lmdeploy.pytorch.model_inputs import get_step_ctx_manager
 
 from ..backends import OpType, get_backend
+from ..utils import get_logger
 from .quant_utils import quant_blocked_fp8
 from .utils import div_up
+
+_LOGGER = get_logger("lmdeploy.moe")
 
 
 class MoeType(Enum):
@@ -158,6 +163,13 @@ class MoEForwardDPTP:
                     expected_tokens,
                     tp_sizes,
                 )
+                if os.environ.get("DLINFER_ASCEND_DEBUG_CAPTURE", "0") == "1":
+                    _LOGGER.warning(
+                        "[MoEDecode] capture_debug local_shape=%s router_shape=%s hidden_head=%s",
+                        tuple(hidden_states.shape),
+                        tuple(router_logits.shape),
+                        hidden_states.shape[-1] if hidden_states.dim() > 1 else None,
+                    )
             raise RuntimeError(
                 f"MoE decode tensor length mismatch (rank={self.gather_rank}): "
                 f"local={local_tokens}, router={router_tokens}, expected={expected_tokens}, tp_sizes={tp_sizes}"
