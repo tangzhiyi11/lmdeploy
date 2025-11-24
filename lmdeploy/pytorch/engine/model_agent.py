@@ -433,6 +433,7 @@ class BaseModelAgent:
                 self._forward_impl(inputs)
                 torch.cuda.synchronize()
                 logger.debug(f'Warmup decoding num_tokens={num_tokens} done.')
+                print(f'########### Warmup decoding num_tokens={num_tokens} done.')
 
     def _slice_outs(self, inputs: torch.Tensor, seq_length: torch.LongTensor):
         """Slice outputs."""

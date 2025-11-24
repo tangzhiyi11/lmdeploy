@@ -8,6 +8,7 @@ from typing import List, Optional
 import torch
 from torch import distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp, Work  # noqa: F401
+from torch.distributed import _functional_collectives as funcol
 
 from .config import DistConfig, TPMode
 
@@ -448,11 +449,37 @@ def gather_by_tp_sizes(x: torch.Tensor,
     return new_x
 
 
+# def reduce_scatter_by_tp_sizes(out: torch.Tensor, rank: int, tp_sizes: List[int], group: dist.ProcessGroup):
+#     """Reduce scatter."""
+#     attn_tp = get_dist_manager().current_config().attn_tp
+#     outs = list(out.split(tp_sizes, -2))
+#     outs = [item for item in outs for _ in range(attn_tp)]
+#     out = outs[rank]
+#     dist.reduce_scatter(out, outs, group=group)
+#     return out
+
 def reduce_scatter_by_tp_sizes(out: torch.Tensor, rank: int, tp_sizes: List[int], group: dist.ProcessGroup):
     """Reduce scatter."""
     attn_tp = get_dist_manager().current_config().attn_tp
     outs = list(out.split(tp_sizes, -2))
-    outs = [item for item in outs for _ in range(attn_tp)]
+    if attn_tp > 1:
+        outs = [item for item in outs for _ in range(attn_tp)]
+    local_chunk = outs[rank]
+    stacked = torch.stack(outs, dim=0)
+    # Functional collectives are Dynamo-compatible and return plain tensors under compilation.
+    reduced = funcol.reduce_scatter_tensor(stacked, "sum", 0, group=group)
+    reduced = reduced.squeeze(0)
+    if reduced.shape != local_chunk.shape:
+        reduced = reduced.reshape(local_chunk.shape)
+    return reduced
+
+
+def reduce_scatter_by_tp_sizes_async(out: torch.Tensor, rank: int, tp_sizes: List[int], group: dist.ProcessGroup):
+    """Reduce scatter (async)."""
+    attn_tp = get_dist_manager().current_config().attn_tp
+    outs = list(out.split(tp_sizes, -2))
+    if attn_tp > 1:
+        outs = [item for item in outs for _ in range(attn_tp)]
     out = outs[rank]
-    dist.reduce_scatter(out, outs, group=group)
-    return out
+    handle = dist.reduce_scatter(out, outs, group=group, async_op=True)
+    return out, handle
