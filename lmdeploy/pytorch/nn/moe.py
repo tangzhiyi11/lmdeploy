@@ -130,9 +130,9 @@ class MoEForwardDPTP:
             cur_topk_ids, _ = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=True)
             handle.wait()
         else:
-            cur_hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.tp_group, async_op=False)
-            cur_topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.tp_group, async_op=False)
-            cur_topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.tp_group, async_op=False)
+            cur_hidden_states = dist.gather_by_tp_sizes(hidden_states, tp_sizes, group=self.gather_group, async_op=False)
+            cur_topk_weights = dist.gather_by_tp_sizes(topk_weights, tp_sizes, group=self.gather_group, async_op=False)
+            cur_topk_ids = dist.gather_by_tp_sizes(topk_ids, tp_sizes, group=self.gather_group, async_op=False)
 
         # MoE gemm
         cur_out = self.gemm_func(cur_hidden_states, cur_topk_weights, cur_topk_ids)

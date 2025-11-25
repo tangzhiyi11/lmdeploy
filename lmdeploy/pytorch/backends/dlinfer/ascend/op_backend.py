@@ -15,6 +15,8 @@ from lmdeploy.utils import get_logger
 from ..op_backend import DlinferOpsBackend
 from .utils import nd_to_nz_spec
 
+from torch.profiler import record_function
+
 logger = get_logger('lmdeploy')
 
 
@@ -146,6 +148,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             raise ValueError(f"unsupported ASCEND_GRAPH_MODE: {os.getenv('ASCEND_GRAPH_MODE')}")
 
     @classmethod
+    @record_function("update_step_context")
     def update_step_context(cls, step_context):
         """Update step context."""
 
