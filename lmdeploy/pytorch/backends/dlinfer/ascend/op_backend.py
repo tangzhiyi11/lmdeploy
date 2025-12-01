@@ -29,7 +29,7 @@ def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_co
         export DLINFER_ASCEND_GRAPH_MODE=piecewise  # Use piecewise mode
         export DLINFER_ASCEND_GRAPH_MODE=full       # Use full mode (default)
     """
-    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'piecewise').lower()
+    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'full').lower()
     assert graph_mode in ['piecewise', 'full'], f"Invalid graph_mode '{graph_mode}'. Must be 'piecewise' or 'full'"
 
     logger.info(f"Creating graph runner with mode: {graph_mode} (from env DLINFER_ASCEND_GRAPH_MODE)")
