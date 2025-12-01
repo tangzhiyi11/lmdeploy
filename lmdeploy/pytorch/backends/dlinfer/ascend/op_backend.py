@@ -18,6 +18,45 @@ from .utils import nd_to_nz_spec
 logger = get_logger('lmdeploy')
 
 
+def get_graph_runner(model: torch.nn.Module, model_config: ModelConfig, cache_config: CacheConfig,
+                     backend_config: BackendConfig, device: torch.device):
+    """
+    Select based on environment variable DLINFER_ASCEND_GRAPH_MODE:
+    - 'full' (default): Existing full graph mode (AscendGraphRunner, using ACL Graph)
+    - 'piecewise': New piecewise mode (AscendPiecewiseGraphRunner)
+    
+    Usage:
+        export DLINFER_ASCEND_GRAPH_MODE=piecewise  # Use piecewise mode
+        export DLINFER_ASCEND_GRAPH_MODE=full       # Use full mode (default)
+    """
+    graph_mode = os.environ.get('DLINFER_ASCEND_GRAPH_MODE', 'piecewise').lower()
+    assert graph_mode in ['piecewise', 'full'], f"Invalid graph_mode '{graph_mode}'. Must be 'piecewise' or 'full'"
+
+    logger.info(f"Creating graph runner with mode: {graph_mode} (from env DLINFER_ASCEND_GRAPH_MODE)")
+
+    if graph_mode == 'piecewise' and not backend_config.eager_mode:
+        try:
+            from dlinfer.graph.ascend_piecewise.ascend_piecewise_runner import (
+                AscendPiecewiseGraphRunner
+            )
+            logger.info("Using Ascend Piecewise Graph mode")
+            print("########### Using Ascend Piecewise Graph mode")
+            return AscendPiecewiseGraphRunner(
+                model, model_config, cache_config, backend_config, device
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize AscendPiecewiseGraphRunner: {e}")
+            raise RuntimeError(f"Piecewise graph mode initialization failed: {e}")
+    else:
+        # graph_mode == 'full':
+        # 使用现有的全图模式（ACL Graph）
+        logger.info("Using Ascend Full Graph mode (ACL Graph)")
+        from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
+        return CUDAGraphRunner(
+            model, model_config, cache_config, backend_config, device
+        )
+
+
 class SocVersion:
     Ascend310P: str = 'Ascend310P'
     Ascend910: str = 'Ascend910'
@@ -168,11 +207,9 @@ class AscendOpsBackend(DlinferOpsBackend):
             is_unpaged_prefill = \
                 all((step_context.q_seqlens ==
                      step_context.kv_seqlens).tolist())
-        q_seqlens_list = step_context.q_seqlens.tolist()
-        kv_seqlens_list = step_context.kv_seqlens.tolist()
-        max_q_seq_len = max(q_seqlens_list)
-        max_kv_seq_len = max(kv_seqlens_list)
 
+        # import pdb;pdb.set_trace()
+        max_q_seq_len, max_kv_seq_len = 0, 0
         if step_context.is_decoding:
             # collect kv_start_indices without using a for-loop,
             # (fill kv-cache for just ONE token during the decoding phase)
@@ -181,6 +218,10 @@ class AscendOpsBackend(DlinferOpsBackend):
             last_block = step_context.block_offsets.gather(1, block_num.view(-1, 1)).view(-1)
             kv_start_indices = last_block * block_size + idx
         else:
+            q_seqlens_list = step_context.q_seqlens.tolist()
+            kv_seqlens_list = step_context.kv_seqlens.tolist()
+            max_q_seq_len = max(q_seqlens_list)
+            max_kv_seq_len = max(kv_seqlens_list)
             for i in range(step_context.q_start_loc.size(0)):
                 q_seq_len = q_seqlens_list[i]
                 kv_seq_len = kv_seqlens_list[i]
@@ -319,8 +360,10 @@ class AscendOpsBackend(DlinferOpsBackend):
                            backend_config: BackendConfig, device: torch.device):
         """Build graph runner."""
         if AscendOpsBackend.enable_aclgraph():
-            from lmdeploy.pytorch.backends.cuda.graph_runner import CUDAGraphRunner
-            return CUDAGraphRunner(model, model_config, cache_config, backend_config, device)
+            graph_runner = get_graph_runner(model, model_config, cache_config, backend_config, device)
+            if hasattr(graph_runner, 'enable_graph'):
+                AscendOpsBackend.enable_graph = graph_runner.enable_graph
+            return graph_runner
         else:
             from .graph_runner import AscendGraphRunner
             ascend_graph_runner = AscendGraphRunner(model, model_config, cache_config, backend_config, device)

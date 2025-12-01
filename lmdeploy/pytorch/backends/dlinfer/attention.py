@@ -100,7 +100,15 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
             kv_zeros = None
 
         # fill kv cache
-        k_cache, v_cache = self.fill_kv_cache(key,
+        # k_cache, v_cache = self.fill_kv_cache(key,
+        #                                       value,
+        #                                       k_cache,
+        #                                       v_cache,
+        #                                       kv_start_indices,
+        #                                       k_scales_zeros=k_scales_zeros,
+        #                                       v_scales_zeros=v_scales_zeros,
+        #                                       quant_bits=quant_bits)
+        self.fill_kv_cache(key,
                                               value,
                                               k_cache,
                                               v_cache,
@@ -109,8 +117,11 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
                                               v_scales_zeros=v_scales_zeros,
                                               quant_bits=quant_bits)
 
-        if inplace:
-            attn_output = query[..., :self.v_head_size]
+
+        if inplace :
+            # pass
+            # attn_output = query[..., :self.v_head_size]
+            attn_output = query
         else:
             q_shape = query.shape
             o_shape = q_shape[:-1] + (self.v_head_size, )
@@ -120,7 +131,7 @@ class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):
             query,
             key,
             value,
-            attn_output,
+            attn_output, #query,
             k_cache,
             v_cache,
             block_offsets,
