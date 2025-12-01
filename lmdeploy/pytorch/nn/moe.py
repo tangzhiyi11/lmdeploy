@@ -479,6 +479,7 @@ class FusedMoE(nn.Module):
                                 self.down.bias,
                                 self.expert_list,
                                 act_func=self.act_func)
+
         if self.all_reduce:
             ret = _moe_reduce(ret, rank=self.tp_rank, tp_mode=self.tp_mode, group=self.tp_group)
         return ret
