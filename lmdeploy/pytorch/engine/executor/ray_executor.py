@@ -286,6 +286,9 @@ class RayExecutor(ExecutorBase):
             self._prefetch_task: asyncio.Task = None
             self.remote_outs: asyncio.Queue = None
 
+            rank_offset = dist_config.dp_rank * attn_tp
+            self.rank_offset = rank_offset
+
             logger.info('Init distributed environment by device.')
             self._init_distributed_environment_by_device(device_type)
 
@@ -586,7 +589,7 @@ class RayExecutor(ExecutorBase):
             # if rank table file is not set, treat as single node
             # simply set device by index, this is for single node, multiple devices
             self.workers = self._sort_workers(driver_ip, self.workers)
-            ray.get([worker.set_device.remote(idx) for idx, worker in enumerate(self.workers)])
+            ray.get([worker.set_device.remote(idx + self.rank_offset) for idx, worker in enumerate(self.workers)])
         else:
             self.workers = self._sort_workers(driver_ip, self.workers)
 
