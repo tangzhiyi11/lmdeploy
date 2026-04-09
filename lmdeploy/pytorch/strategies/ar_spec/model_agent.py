@@ -43,10 +43,35 @@ class ARSpecExtraInputs(ExtraInputs):
                 f'num_rejected_tokens={self.num_rejected_tokens}, '
                 f'output_token_ids={self.output_token_ids})')
 
+    def ensure_draft_runtime_inputs(self, model_inputs: ModelInputs):
+        """Allocate broadcast buffers for leader rejection results."""
+        batch_size = model_inputs.seq_length.size(0)
+        next_token_ids = self.next_token_ids
+        if next_token_ids is None:
+            next_token_ids = model_inputs.input_ids.new_zeros(batch_size)
+
+        last_token_indices = self.last_token_indices
+        if last_token_indices is None:
+            last_token_indices = model_inputs.seq_length.new_zeros(batch_size)
+
+        num_rejected_tokens = self.num_rejected_tokens
+        if num_rejected_tokens is None:
+            num_rejected_tokens = model_inputs.seq_length.new_zeros(batch_size)
+
+        return self.clone(next_token_ids=next_token_ids,
+                          last_token_indices=last_token_indices,
+                          num_rejected_tokens=num_rejected_tokens)
+
     def broadcast(self, src: int, group, async_op=False):
         dist.broadcast(self.output_draft_token_ids, src=src, group=group, async_op=async_op)
         handle = dist.broadcast(self.num_rejected_tokens, src=src, group=group, async_op=async_op)
         return handle
+
+    def broadcast_draft_runtime_inputs(self, src: int, group):
+        """Broadcast leader rejection outputs before draft forward."""
+        dist.broadcast(self.next_token_ids, src=src, group=group)
+        dist.broadcast(self.last_token_indices, src=src, group=group)
+        dist.broadcast(self.num_rejected_tokens, src=src, group=group)
 
     def clone(self, **kwargs):
         """Get new ARSpecExtraInputs with updated fields."""
@@ -255,6 +280,18 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
             extra_inputs.output_draft_token_ids = inputs.input_ids.new_zeros((batch_size, self.num_spec_tokens))
             extra_inputs.num_rejected_tokens = inputs.input_ids.new_zeros(batch_size)
         return next_token_ids, extra_inputs
+
+    def sync_draft_runtime_inputs(self, extra_inputs: ARSpecExtraInputs, model_inputs: ModelInputs,
+                                  dist_ctx: DistContext) -> ARSpecExtraInputs:
+        """Share leader rejection outputs before all-rank draft forward."""
+        extra_inputs = extra_inputs.ensure_draft_runtime_inputs(model_inputs)
+        tp_gpu_group = dist_ctx.attn_tp_group.gpu_group
+        if tp_gpu_group is None:
+            return extra_inputs
+
+        src_rank = dist.get_global_rank(tp_gpu_group, 0)
+        extra_inputs.broadcast_draft_runtime_inputs(src=src_rank, group=tp_gpu_group)
+        return extra_inputs
 
     @contextmanager
     def broadcast_next_token(self, next_token_ids: torch.Tensor, extra_inputs: ARSpecExtraInputs,

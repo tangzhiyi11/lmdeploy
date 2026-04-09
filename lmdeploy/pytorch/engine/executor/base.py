@@ -211,7 +211,10 @@ class ExecutorBase:
         if self.specdecode_config:
             spec_model_config = self.specdecode_config.model_config
             if spec_cache_config := self.specdecode_config.cache_config:
-                spec_cache_block_size = CacheEngine.get_cache_block_size(spec_cache_config, spec_model_config, 1)
+                spec_model_config.block_size = spec_cache_config.block_size
+                spec_cache_block_size = CacheEngine.get_cache_block_size(spec_cache_config,
+                                                                        spec_model_config,
+                                                                        self.dist_config.attn_tp)
 
         runtime_mem, max_prefill_token_num = self._get_runtime_size(free_mem, cache_block_size + spec_cache_block_size,
                                                                     vocal_size)

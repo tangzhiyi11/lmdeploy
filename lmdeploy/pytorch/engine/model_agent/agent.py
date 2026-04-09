@@ -739,12 +739,20 @@ class BaseModelAgent:
         inputs: ModelInputs,
         last_logits: torch.Tensor,
         extra_inputs: ExtraInputs,
+        sampling_inputs: SamplingInputs,
         need_broadcast_next: bool,
     ):
         rank = self.rank
-        # Avoid adding the ADInplaceOrView dispatch key to `next_token_ids`,
-        # as it can trigger recompilation on different ranks when using torch.compile.
-        next_token_ids, extra_inputs = self.agent_strategy.make_dummy_next_token(inputs, last_logits, extra_inputs)
+        if self.spec_agent.is_enabled():
+            extra_inputs = await self.spec_agent.async_model_forward(inputs,
+                                                                    extra_inputs,
+                                                                    sampling_inputs,
+                                                                    do_rejection_sampling=False)
+            next_token_ids = extra_inputs.next_token_ids
+        else:
+            # Avoid adding the ADInplaceOrView dispatch key to `next_token_ids`,
+            # as it can trigger recompilation on different ranks when using torch.compile.
+            next_token_ids, extra_inputs = self.agent_strategy.make_dummy_next_token(inputs, last_logits, extra_inputs)
 
         # broadcast next token for TP > 1
         with self._broadcast_next_token(next_token_ids, extra_inputs, enable=need_broadcast_next):
@@ -899,6 +907,7 @@ class BaseModelAgent:
                     inputs,
                     last_logits,
                     extra_inputs,
+                    sampling_inputs,
                     need_broadcast_next,
                 ))
 

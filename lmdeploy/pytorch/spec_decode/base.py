@@ -40,8 +40,11 @@ class BaseSpecModelAgent:
         """Build cache engine."""
         pass
 
-    async def async_model_forward(self, next_token_ids: torch.Tensor, model_inputs: ModelInputs,
-                                  extra_inputs: ExtraInputs, sampling_inputs: SamplingInputs):
+    async def async_model_forward(self,
+                                  model_inputs: ModelInputs,
+                                  extra_inputs: ExtraInputs,
+                                  sampling_inputs: SamplingInputs,
+                                  do_rejection_sampling: bool = True):
         """Draft model forward."""
         return extra_inputs
 

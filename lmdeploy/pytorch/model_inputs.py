@@ -293,6 +293,9 @@ class StepContext:
     # mrope
     mrope_position_ids: torch.Tensor | None = None
 
+    # speculative draft model marker for backend-specific handling
+    is_draft_model: bool = False
+
     _outputs: dict = field(default_factory=dict)
 
     # chunk with multimodal
@@ -363,6 +366,7 @@ class StepContext:
             target_hidden_states=inputs.target_hidden_states,
             target_inputs_embeds=inputs.target_inputs_embeds,
             mrope_position_ids=inputs.mrope_pos_ids,
+            is_draft_model=getattr(model_config, 'is_draft_model', False),
             is_chunk_multimodal=inputs.is_chunk_multimodal,
         )
 

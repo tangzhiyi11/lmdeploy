@@ -9,7 +9,8 @@ from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.nn import RMSNorm
-from lmdeploy.pytorch.nn.linear import build_colwise_linear
+from lmdeploy.pytorch.nn.linear import build_rowwise_linear
+from lmdeploy.pytorch.nn.utils import chunk_aligned
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .patch import add_prefix, get_build_model_context
@@ -37,7 +38,7 @@ class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
                                           layer_idx,
                                           dtype=dtype,
                                           device=device,
-                                          is_tp=False,
+                                          is_tp=True,
                                           prefix=add_prefix('self_attn', prefix=prefix),
                                           )
 
@@ -47,16 +48,15 @@ class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
                                                 layer_idx,
                                                 dtype=dtype,
                                                 device=device,
-                                                is_tp=False,
+                                                is_tp=True,
                                                 prefix=add_prefix('mlp', prefix=prefix),
                                                 )
-            self.mlp._all_reduce = False
         else:
             self.mlp = Qwen3_5MLP(config,
                                   dtype=dtype,
                                   device=device,
-                                  is_tp=False,
-                                  all_reduce=False,
+                                  is_tp=True,
+                                  all_reduce=True,
                                   prefix=add_prefix('mlp', prefix=prefix),
                                   )
 
@@ -84,6 +84,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.dtype = dtype
         self.mtp_start_layer_idx = 0
         self.num_mtp_layers = config.mtp_num_hidden_layers
         # to map the exact layer index from weights
@@ -108,15 +109,17 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # shared with target model
         self.embed_tokens = None
 
-        self.fc = build_colwise_linear(
+        self.fc = build_rowwise_linear(
             config.hidden_size * 2,
             config.hidden_size,
             bias=False,
             dtype=dtype,
             device=device,
-            is_tp=False,
+            is_tp=True,
             quant_config=quantization_config,
+            all_reduce=True,
             dp_disable_tp=True,
+            prefix=add_prefix('fc', prefix=prefix),
         )
 
         # build rotary embedding
@@ -149,10 +152,19 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # TODO: fix input mrope position ids
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        if self.dtype is not None and inputs_embeds.dtype != self.dtype:
+            inputs_embeds = inputs_embeds.to(self.dtype)
+        previous_hidden_states = previous_hidden_states.to(inputs_embeds)
 
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         previous_hidden_states = self.pre_fc_norm_hidden(previous_hidden_states)
         hidden_states = torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        if getattr(self.fc, 'is_tp', False) and not getattr(self.fc, 'colwise', True):
+            # LMDeploy rowwise linear expects the input feature dimension to be
+            # pre-sharded per TP rank. The draft path still materializes the
+            # concatenated hidden state first, so slice the local shard here.
+            hidden_states = chunk_aligned(hidden_states, self.fc.tp, -1, self.fc.tp_align_size)[self.fc.tp_rank]
+            hidden_states = hidden_states.contiguous()
         hidden_states = self.fc(hidden_states)
 
         # rotary embedding

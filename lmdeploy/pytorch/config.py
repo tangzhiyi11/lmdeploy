@@ -357,6 +357,9 @@ class ModelConfig:
     # flags mark if this model use mrope
     use_mrope: bool = False
 
+    # speculative draft model marker
+    is_draft_model: bool = False
+
     def get_head_size(self):
         """Get head size."""
         return self.head_dim
@@ -461,6 +464,8 @@ class ModelConfig:
             assert model_config.head_dim is not None
             model_config.v_head_dim = model_config.head_dim
 
+        model_config.is_draft_model = is_draft_model
+
         # check for tp
         assert model_config.num_attention_heads % tp == 0
         if model_config.num_key_value_heads >= tp:
@@ -561,6 +566,7 @@ class SpecDecodeConfig:
         num_speculative_tokens: int,
         model: str,
         target_cache_cfg: CacheConfig,
+        dist_config: DistConfig = None,
         target_model: str = None,
         dtype: str = 'auto',
     ):
@@ -568,6 +574,7 @@ class SpecDecodeConfig:
         model_config = ModelConfig.from_pretrained(model,
                                                    trust_remote_code=True,
                                                    dtype=dtype,
+                                                   dist_config=dist_config,
                                                    is_draft_model=True,
                                                    spec_method=method,
                                                    block_size=target_cache_cfg.block_size,

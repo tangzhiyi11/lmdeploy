@@ -12,7 +12,8 @@ def build_spec_agent(specdecode_config: SpecDecodeConfig,
                      misc_config: MiscConfig,
                      device: str = 'cuda'):
     """Build spec agent."""
-    enable = dist_ctx.rank % dist_ctx.dist_config.attn_tp == 0 and specdecode_config is not None
+    enable = specdecode_config is not None and (
+        specdecode_config.method == 'qwen3_5_mtp' or dist_ctx.rank % dist_ctx.dist_config.attn_tp == 0)
     if enable:
         from .spec_agent import SpecModelAgent
         return SpecModelAgent(specdecode_config,

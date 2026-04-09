@@ -38,6 +38,58 @@ def get_resource_kwargs(device_str: str, resource_used: float = 0.01) -> dict[st
     return resource_kwargs
 
 
+def _infer_local_ray_custom_resources(device_type: str, world_size: int) -> dict[str, float] | None:
+    """Resources to pass to ray.init() for a fresh local cluster.
+
+    Ray does not auto-detect Ascend NPUs (or Camb MLUs); without registering
+    custom resources, placement groups requesting e.g. ``{'NPU': 1}`` never schedule.
+    """
+    if device_type == 'ascend':
+        n = None
+        try:
+            import torch
+            npu_mod = getattr(torch, 'npu', None)
+            if npu_mod is not None and callable(getattr(npu_mod, 'device_count', None)):
+                n = int(npu_mod.device_count())
+                if n <= 0:
+                    n = None
+        except Exception:
+            n = None
+        if n is None:
+            vis = os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '').strip()
+            if vis:
+                n = len([x for x in vis.split(',') if x.strip() != ''])
+        if n is None or n <= 0:
+            n = int(world_size)
+            logger.warning(
+                'Could not detect NPU count via torch.npu.device_count() or '
+                'ASCEND_RT_VISIBLE_DEVICES; registering Ray resource NPU=%d from '
+                'parallel world size. Set visible devices if this is wrong.', n)
+        elif n < world_size:
+            logger.warning(
+                'Detected %d NPUs on node but placement group needs %d bundles; '
+                'scheduling may fail. Check tp/world_size and device visibility.', n,
+                world_size)
+        return {'NPU': float(n)}
+    if device_type == 'camb':
+        n = None
+        try:
+            import torch
+            mlu = getattr(torch, 'mlu', None)
+            if mlu is not None and callable(getattr(mlu, 'device_count', None)):
+                n = int(mlu.device_count())
+                if n <= 0:
+                    n = None
+        except Exception:
+            n = None
+        if n is None or n <= 0:
+            n = int(world_size)
+            logger.warning(
+                'Could not detect MLU count; registering Ray resource MLU=%d from world_size.', n)
+        return {'MLU': float(n)}
+    return None
+
+
 def _wait_until_pg_ready(current_placement_group: PlacementGroup):
     """Wait until a placement group is ready.
 
@@ -97,13 +149,21 @@ def init_ray_cluster(world_size: int, ray_address: str = None, dp: int = 1, devi
     """Init ray cluster."""
     # modifier from vLLM
     if not ray.is_initialized():
+        num_cpus = world_size
+        object_store_memory = _get_obj_store_memory(dp=dp)
+        init_kwargs = dict(
+            ignore_reinit_error=True,
+            num_cpus=num_cpus,
+            object_store_memory=object_store_memory,
+        )
+        if ray_address is not None:
+            init_kwargs['address'] = ray_address
+        if ray_address is None:
+            custom_res = _infer_local_ray_custom_resources(device_type, world_size)
+            if custom_res:
+                init_kwargs['resources'] = custom_res
         try:
-            num_cpus = world_size
-            object_store_memory = _get_obj_store_memory(dp=dp)
-            ray.init(address=ray_address,
-                     ignore_reinit_error=True,
-                     num_cpus=num_cpus,
-                     object_store_memory=object_store_memory)
+            ray.init(**init_kwargs)
         except ValueError as e:
             if e.args is not None and len(e.args) >= 1 and e.args[
                     0] == 'When connecting to an existing cluster, num_cpus and num_gpus must not be provided.':

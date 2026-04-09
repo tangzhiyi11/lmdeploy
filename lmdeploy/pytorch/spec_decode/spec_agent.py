@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import inspect
+
 import torch
 from torch.profiler import record_function
 
@@ -7,6 +9,7 @@ from lmdeploy.utils import get_logger
 
 from ..backends import get_backend
 from ..config import BackendConfig, CacheConfig, MiscConfig, ModelConfig, SpecDecodeConfig
+from ..distributed import get_dist_manager
 from ..engine.cache_engine import CacheEngine
 from ..engine.logits_process import FusedLogitsProcessor, SamplingInputs, _torch_topk
 from ..engine.model_agent.agent import BatchedLogProbs
@@ -122,6 +125,9 @@ class SpecModelAgent(BaseSpecModelAgent):
         self.method = specdecode_config.method
         self.model_config = specdecode_config.model_config
         self.cache_config = specdecode_config.cache_config
+        self._skip_warmup = False
+        if self.model_config is not None and self.cache_config is not None:
+            self.model_config.block_size = self.cache_config.block_size
 
         # make dummy meta
         self.make_dummy_meta = self.inputs_strategy.create_make_dummy_meta(self.model_config)
@@ -131,11 +137,17 @@ class SpecModelAgent(BaseSpecModelAgent):
     def set_cache_config(self, cache_config: CacheConfig):
         """Set all cache config."""
         self.cache_config = cache_config
+        if self.model_config is not None and self.cache_config is not None:
+            self.model_config.block_size = self.cache_config.block_size
+            self.specdecode_config.model_config = self.model_config
 
     def set_model_config(self, model_config: ModelConfig):
         """Set model config."""
         self.model_config = model_config
         if model_config is not None:
+            if self.cache_config is not None:
+                self.model_config.block_size = self.cache_config.block_size
+            self.specdecode_config.model_config = self.model_config
             # make dummy meta
             self.make_dummy_meta = self.inputs_strategy.create_make_dummy_meta(self.model_config)
 
@@ -145,6 +157,20 @@ class SpecModelAgent(BaseSpecModelAgent):
 
     def build_graph_runner(self):
         """Build graph runner."""
+        if self.method == 'qwen3_5_mtp' and self.backend_config.device_type in ['ascend', 'npu']:
+            # TP collectives in the draft MTP path can hang under Ascend NPUGraph capture.
+            # Keep the draft model on the eager runner so the main model can still use graphs.
+            from ..backends.graph_runner import GraphRunner
+            logger.info('Use eager draft runner for qwen3_5_mtp on Ascend.')
+            self.proposer.model = GraphRunner(self.proposer.model,
+                                             model_config=self.model_config,
+                                             cache_config=self.cache_config,
+                                             backend_config=self.backend_config,
+                                             device=self.device)
+            self._skip_warmup = True
+            return
+
+        self._skip_warmup = False
         backend = get_backend()
         self.proposer.model = backend.build_graph_runner(self.proposer.model,
                                                          model_config=self.model_config,
@@ -155,11 +181,15 @@ class SpecModelAgent(BaseSpecModelAgent):
     def build_cache_engine(self, cache_stream: torch.cuda.Stream):
         """Build cache engine."""
         if self.cache_config is not None:
+            dist_ctx = get_dist_manager().current_context()
+            rank = 0 if dist_ctx is None else dist_ctx.rank
+            tp_rank = 0 if dist_ctx is None else dist_ctx.attn_tp_group.rank
+            world_size = 1 if dist_ctx is None else dist_ctx.dist_config.attn_tp
             self.cache_engine = CacheEngine(self.cache_config,
                                             self.model_config,
-                                            rank=0,
-                                            tp_rank=0,
-                                            world_size=1,
+                                            rank=rank,
+                                            tp_rank=tp_rank,
+                                            world_size=world_size,
                                             cache_stream=cache_stream)
 
     def _prepare_inputs_from_main(self, model_inputs: ModelInputs, extra_inputs: ExtraInputs):
@@ -403,8 +433,7 @@ class SpecModelAgent(BaseSpecModelAgent):
 
     def _forward_impl(self, inputs: ModelInputs):
         """Forward impl."""
-        output = self.proposer._forward(inputs, cache_engine=self.cache_engine)
-        return output
+        return self.proposer._forward(inputs, cache_engine=self.cache_engine)
 
     async def _async_model_forward(self, inputs: ModelInputs, extra_inputs: ARSpecExtraInputs,
                                    sampling_inputs: SamplingInputs):
@@ -454,29 +483,103 @@ class SpecModelAgent(BaseSpecModelAgent):
         )
         return extra_inputs
 
+    def _sync_draft_runtime_inputs(self, model_inputs: ModelInputs,
+                                   extra_inputs: ARSpecExtraInputs) -> ARSpecExtraInputs:
+        """Share leader rejection outputs before all-rank draft forward."""
+        dist_ctx = get_dist_manager().current_context()
+        if dist_ctx is None or dist_ctx.dist_config.attn_tp <= 1:
+            return extra_inputs.ensure_draft_runtime_inputs(model_inputs)
+
+        sync_fn = getattr(self.agent_strategy, 'sync_draft_runtime_inputs', None)
+        if sync_fn is None:
+            return extra_inputs.ensure_draft_runtime_inputs(model_inputs)
+        return sync_fn(extra_inputs, model_inputs, dist_ctx)
+
+    async def run_rejection_sampling(self,
+                                     model_inputs: ModelInputs,
+                                     extra_inputs: ARSpecExtraInputs,
+                                     sampling_inputs: SamplingInputs,
+                                     enabled: bool) -> ARSpecExtraInputs:
+        """Run leader-only rejection sampling and share its outputs."""
+        if enabled:
+            extra_inputs = await self._rejection_sampling(model_inputs, extra_inputs, sampling_inputs)
+        else:
+            extra_inputs = extra_inputs.clone(next_token_ids=None,
+                                              last_token_indices=None,
+                                              num_rejected_tokens=None,
+                                              output_token_ids=None,
+                                              logprobs=None)
+        return self._sync_draft_runtime_inputs(model_inputs, extra_inputs)
+
+    async def run_draft_forward(self,
+                                model_inputs: ModelInputs,
+                                extra_inputs: ARSpecExtraInputs,
+                                sampling_inputs: SamplingInputs):
+        """Run draft forward on every TP rank after sync."""
+        draft_model_inputs, draft_extra_inputs = self._prepare_inputs_from_main(model_inputs, extra_inputs)
+        return await self._async_model_forward(draft_model_inputs, draft_extra_inputs, sampling_inputs)
+
     async def async_model_forward(
         self,
         model_inputs: ModelInputs,
         extra_inputs: ExtraInputs,
         sampling_inputs: SamplingInputs,
+        do_rejection_sampling: bool = True,
     ):
         """Draft model forward."""
-        draft_extra_inputs = await self._rejection_sampling(model_inputs, extra_inputs, sampling_inputs)
-        draft_model_inputs, draft_extra_inputs = self._prepare_inputs_from_main(model_inputs, draft_extra_inputs)
-        return await self._async_model_forward(draft_model_inputs, draft_extra_inputs, sampling_inputs)
+        draft_extra_inputs = await self.run_rejection_sampling(model_inputs,
+                                                               extra_inputs,
+                                                               sampling_inputs,
+                                                               enabled=do_rejection_sampling)
+        return await self.run_draft_forward(model_inputs, draft_extra_inputs, sampling_inputs)
+
+    def _make_warmup_inputs(
+        self,
+        batch_size: int,
+        is_decoding: bool,
+        target_hidden_size: int,
+        max_q_seqlen: int = 1,
+    ) -> ModelInputs:
+        """Create warmup inputs for draft model across old/new strategy APIs."""
+        make_dummy = self.inputs_strategy.make_dummy
+        sig = inspect.signature(make_dummy)
+        kwargs = dict(
+            batch_size=batch_size,
+            is_decoding=is_decoding,
+            device='cuda',
+            vocab_size=self.model_config.vocab_size,
+            max_q_seqlen=max_q_seqlen,
+            target_hidden_size=target_hidden_size,
+            target_dtype=self.model_config.dtype,
+            meta=self.make_dummy_meta,
+        )
+        if 'target_hidden_size' in sig.parameters:
+            return make_dummy(**kwargs)
+
+        logger.warning(
+            'Inputs strategy %s does not support draft warmup kwargs; '
+            'falling back to ARSpecModelInputsStrategy.',
+            type(self.inputs_strategy).__name__,
+        )
+        from ..strategies.ar_spec.model_inputs import ARSpecModelInputsStrategy
+
+        fallback = ARSpecModelInputsStrategy(self.num_spec_tokens)
+        return fallback.make_dummy(**kwargs)
 
     def warmup(self, max_batches: int, target_model_config: ModelConfig):
         """warmup."""
+        if self._skip_warmup:
+            logger.info('Skip draft warmup for eager qwen3_5_mtp runner on Ascend.')
+            return
+
         target_hidden_size = self.proposer.get_target_hidden_size(target_model_config)
 
         # warmup prefill
-        inputs = self.inputs_strategy.make_dummy(max_batches,
-                                                 is_decoding=False,
-                                                 device='cuda',
-                                                 vocab_size=self.model_config.vocab_size,
-                                                 target_hidden_size=target_hidden_size,
-                                                 target_dtype=self.model_config.dtype,
-                                                 meta=self.make_dummy_meta)
+        inputs = self._make_warmup_inputs(
+            max_batches,
+            is_decoding=False,
+            target_hidden_size=target_hidden_size,
+        )
 
         self._forward_impl(inputs)
 
@@ -485,24 +588,20 @@ class SpecModelAgent(BaseSpecModelAgent):
 
         for batch_size in capture_batch_sizes:
             # decode with num_spec_tokens + 1 per seq
-            inputs = self.inputs_strategy.make_dummy(batch_size,
-                                                     is_decoding=True,
-                                                     device='cuda',
-                                                     vocab_size=self.model_config.vocab_size,
-                                                     max_q_seqlen=self.num_spec_tokens + 1,
-                                                     target_hidden_size=target_hidden_size,
-                                                     target_dtype=self.model_config.dtype,
-                                                     meta=self.make_dummy_meta)
+            inputs = self._make_warmup_inputs(
+                batch_size,
+                is_decoding=True,
+                max_q_seqlen=self.num_spec_tokens + 1,
+                target_hidden_size=target_hidden_size,
+            )
             self._forward_impl(inputs)
             # decode 1 tokens per sequence
-            inputs = self.inputs_strategy.make_dummy(batch_size,
-                                                     is_decoding=True,
-                                                     device='cuda',
-                                                     vocab_size=self.model_config.vocab_size,
-                                                     max_q_seqlen=1,
-                                                     target_hidden_size=self.model_config.hidden_size,
-                                                     target_dtype=self.model_config.dtype,
-                                                     meta=self.make_dummy_meta)
+            inputs = self._make_warmup_inputs(
+                batch_size,
+                is_decoding=True,
+                max_q_seqlen=1,
+                target_hidden_size=self.model_config.hidden_size,
+            )
             self._forward_impl(inputs)
 
     def reset_graph_runner(self):

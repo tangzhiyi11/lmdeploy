@@ -76,10 +76,11 @@ class Qwen3_5ModelConfigBuilder(AutoModelConfigBuilder):
 
         # draft model cfg
         if is_draft_model:
-            hf_config.architectures[0] = 'Qwen3_5MTPModel'
-            # remove for correct mapping when building the patched model
-            if hasattr(hf_config, 'auto_map'):
-                del hf_config.auto_map
+            hf_config.architectures = ['Qwen3_5MTPModel']
+            # Clear auto_map so it cannot override draft arch (some configs keep it
+            # as a non-deletable / re-hydrated field after del).
+            if getattr(hf_config, 'auto_map', None):
+                hf_config.auto_map = {}
 
             cfg.model_paradigm = 'ar_spec'
             cfg.num_layers = text_config.mtp_num_hidden_layers

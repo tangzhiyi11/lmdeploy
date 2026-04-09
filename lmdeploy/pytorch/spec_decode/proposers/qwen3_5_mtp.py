@@ -15,5 +15,17 @@ class Qwen3_5MTP(DeepseekMTP):
     def build_model(self, empty_init: bool, target_model: torch.nn.Module = None, build_model_ctx=None):
         super().build_model(empty_init, target_model=target_model, build_model_ctx=build_model_ctx)
         logger.info('Using embed_tokens from target model.')
-        self.model.set_input_embeddings(target_model.get_input_embeddings())
-        assert self.model.get_input_embeddings() is not None, 'Input embeddings should not be None.'
+        target_emb = target_model.get_input_embeddings()
+        model = self.model
+        if hasattr(model, 'set_input_embeddings'):
+            model.set_input_embeddings(target_emb)
+        elif hasattr(model, 'model') and hasattr(model.model, 'set_input_embeddings'):
+            model.model.set_input_embeddings(target_emb)
+        elif hasattr(model, 'model') and hasattr(model.model, 'language_model'):
+            # lmdeploy Qwen3_5 / MoE stacks are nn.Module, not PreTrainedModel
+            model.model.language_model.embed_tokens = target_emb
+        else:
+            raise AttributeError(
+                'Draft model has no set_input_embeddings and no language_model.embed_tokens; '
+                f'got {type(model).__name__}.')
+        assert model.get_input_embeddings() is not None, 'Input embeddings should not be None.'

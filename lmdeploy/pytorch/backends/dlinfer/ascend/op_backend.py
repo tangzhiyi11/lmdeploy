@@ -155,12 +155,25 @@ class AscendOpsBackend(DlinferOpsBackend):
         """Update step context."""
 
         block_num, block_size, *_ = step_context.kv_caches[0][0].shape
+        is_draft_model = getattr(step_context, 'is_draft_model', False)
+        # The main model may keep graph capture enabled while the draft model
+        # runs on the eager runner. Keep graph-sensitive metadata logic local
+        # to the current context instead of inheriting the global target state.
+        context_enable_graph = cls.enable_graph and not is_draft_model
         is_unpaged_prefill = False
+        is_multi_token_decoding = False
         if not step_context.is_decoding:
             is_unpaged_prefill = all((step_context.q_seqlens == step_context.kv_seqlens).tolist())
+        else:
+            # Speculative decoding on the main model can decode multiple tokens
+            # per sequence in one step. Ascend dlinfer's "decoding" path assumes
+            # exactly one token per sequence, so route multi-token decoding
+            # through the paged-prefill semantics instead.
+            is_multi_token_decoding = torch.max(step_context.q_seqlens).item() > 1
+        effective_is_decoding = step_context.is_decoding and not is_multi_token_decoding
         if step_context.block_offsets.dtype != torch.int32:
             step_context.block_offsets = step_context.block_offsets.to(torch.int32)
-        if not (step_context.is_decoding or is_unpaged_prefill):
+        if not (effective_is_decoding or is_unpaged_prefill):
             step_context.block_offsets = step_context.block_offsets.repeat_interleave(step_context.q_seqlens, 0)
         if step_context.kv_seqlens.dtype != torch.int32:
             step_context.kv_seqlens = step_context.kv_seqlens.to(torch.int32)
@@ -281,7 +294,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             if ep_size <= 1:
                 return 0, 0, 0
             # get padded_tokens_current_rank
-            is_graph = cls.enable_graph and step_context.is_decoding
+            is_graph = context_enable_graph and effective_is_decoding
             if is_graph:
                 from dlinfer.framework.lmdeploy_ext.cudagraph.ascend_cudagraph import get_ascend_compatible_size
                 actual_tokens_current_rank = step_context.q_seqlens.shape[0]
@@ -315,7 +328,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             if ep_size <= 1:
                 return DlinferMoECommType.ALLGATHER
             mc2_token_capacity = init_mc2_token_capacity(tp_size)
-            is_graph = cls.enable_graph and step_context.is_decoding
+            is_graph = context_enable_graph and effective_is_decoding
             if is_graph:
                 max_tokens_across_dp = math.ceil(max_tokens_across_dp / tp_size) * tp_size
             if SocVersion.is_A2():
@@ -357,18 +370,18 @@ class AscendOpsBackend(DlinferOpsBackend):
             group_name = backend.get_hccl_comm_name(local_rank)
             return group_name
 
-        q_seqlens_cpu, kv_seqlens_cpu, kv_seqlens_expanded = get_cpu_seqlens(step_context.is_decoding,
+        q_seqlens_cpu, kv_seqlens_cpu, kv_seqlens_expanded = get_cpu_seqlens(effective_is_decoding,
                                                                              is_unpaged_prefill)
-        q_seqlens_list, kv_seqlens_list = get_list_seqlens(step_context.is_decoding, is_unpaged_prefill, q_seqlens_cpu,
+        q_seqlens_list, kv_seqlens_list = get_list_seqlens(effective_is_decoding, is_unpaged_prefill, q_seqlens_cpu,
                                                            kv_seqlens_cpu)
-        max_q_seq_len, max_kv_seq_len = get_max_seqlens(step_context.is_decoding, is_unpaged_prefill, q_seqlens_list,
+        max_q_seq_len, max_kv_seq_len = get_max_seqlens(effective_is_decoding, is_unpaged_prefill, q_seqlens_list,
                                                         kv_seqlens_list)
-        kv_start_indices, attention_mask = get_kv_start_indices_and_attention_mask(step_context.is_decoding,
+        kv_start_indices, attention_mask = get_kv_start_indices_and_attention_mask(effective_is_decoding,
                                                                                    is_unpaged_prefill, q_seqlens_list,
                                                                                    kv_seqlens_list, max_q_seq_len,
                                                                                    max_kv_seq_len)
 
-        if not cls.enable_graph and step_context.kv_quant_policy == 8:
+        if not context_enable_graph and step_context.kv_quant_policy == 8:
             record_file = os.getenv('ASCEND_QUANT_RECORD_FILE')
             assert record_file, 'please specify valid ASCEND_QUANT_RECORD_FILE'
             path = Path(record_file)
@@ -389,12 +402,12 @@ class AscendOpsBackend(DlinferOpsBackend):
             q_start_loc = step_context.q_start_loc.to(dtype=step_context.q_seqlens.dtype,
                                                       device=step_context.q_seqlens.device)
             cu_seqlens = torch.cat((q_start_loc, step_context.q_seqlens.sum().unsqueeze(0))).int()
-            if not step_context.is_decoding:
+            if not effective_is_decoding:
                 has_initial_state = ~(step_context.q_seqlens == step_context.kv_seqlens)
 
         attn_meta_cls = cls.get_attention_metadata_cls()
         attn_metadata = attn_meta_cls(
-            step_context.is_decoding,
+            effective_is_decoding,
             step_context.block_offsets,
             # cu_seqlens is only used in GDN and is passed down via q_start_loc.
             # Otherwise, q_start_loc is None.
