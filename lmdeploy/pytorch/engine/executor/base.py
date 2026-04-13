@@ -212,9 +212,11 @@ class ExecutorBase:
             spec_model_config = self.specdecode_config.model_config
             if spec_cache_config := self.specdecode_config.cache_config:
                 spec_model_config.block_size = spec_cache_config.block_size
+                # Draft model runs without TP (is_tp=False), so its cache
+                # block size is calculated with world_size=1.
                 spec_cache_block_size = CacheEngine.get_cache_block_size(spec_cache_config,
                                                                         spec_model_config,
-                                                                        self.dist_config.attn_tp)
+                                                                        1)
 
         runtime_mem, max_prefill_token_num = self._get_runtime_size(free_mem, cache_block_size + spec_cache_block_size,
                                                                     vocal_size)

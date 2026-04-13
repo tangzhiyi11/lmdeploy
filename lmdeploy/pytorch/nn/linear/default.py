@@ -247,7 +247,7 @@ class QKVBaseLinear(MergedBaseLinear, QKVMixin):
         shard_idx = self.out_names_map[shard_id]
         param_w = param.data.split(self.all_out_features, 0)[shard_idx]
 
-        if self.num_replicate_kv_heads > 1 and shard_id in ['k', 'v']:
+        if self.is_tp and self.num_replicate_kv_heads > 1 and shard_id in ['k', 'v']:
             # update to duplicate k/v for tp_size > num_kv_heads
             chunk_size = world_size // self.num_replicate_kv_heads
             chunk_idx = rank // self.num_replicate_kv_heads

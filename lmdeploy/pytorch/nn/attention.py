@@ -34,6 +34,7 @@ class Attention(nn.Module):
         use_flash_mla: bool = False,
         learnable_sink: bool = False,
         block_sparse_size: int = 1,
+        is_tp: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -42,7 +43,8 @@ class Attention(nn.Module):
         if v_head_size is None:
             v_head_size = head_size
         self.origin_num_heads = num_heads
-        num_heads, num_kv_heads = _update_num_heads(num_heads, num_kv_heads)
+        if is_tp:
+            num_heads, num_kv_heads = _update_num_heads(num_heads, num_kv_heads)
         self.num_heads = num_heads
 
         layer_backend = get_backend()

@@ -181,15 +181,13 @@ class SpecModelAgent(BaseSpecModelAgent):
     def build_cache_engine(self, cache_stream: torch.cuda.Stream):
         """Build cache engine."""
         if self.cache_config is not None:
-            dist_ctx = get_dist_manager().current_context()
-            rank = 0 if dist_ctx is None else dist_ctx.rank
-            tp_rank = 0 if dist_ctx is None else dist_ctx.attn_tp_group.rank
-            world_size = 1 if dist_ctx is None else dist_ctx.dist_config.attn_tp
+            # Draft model runs without TP (is_tp=False); each rank holds a full
+            # copy so the cache engine uses world_size=1 regardless of global TP.
             self.cache_engine = CacheEngine(self.cache_config,
                                             self.model_config,
-                                            rank=rank,
-                                            tp_rank=tp_rank,
-                                            world_size=world_size,
+                                            rank=0,
+                                            tp_rank=0,
+                                            world_size=1,
                                             cache_stream=cache_stream)
 
     def _prepare_inputs_from_main(self, model_inputs: ModelInputs, extra_inputs: ExtraInputs):

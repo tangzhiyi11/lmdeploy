@@ -639,6 +639,7 @@ class Qwen3_5Attention(nn.Module):
             head_dim,
             num_kv_heads=num_key_value_heads,
             v_head_size=head_dim,
+            is_tp=is_tp,
         )
 
         # o_proj

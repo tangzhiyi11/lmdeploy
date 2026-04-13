@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import copy
 from collections.abc import Iterable
 from typing import Any
 
@@ -9,8 +10,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.nn import RMSNorm
-from lmdeploy.pytorch.nn.linear import build_rowwise_linear
-from lmdeploy.pytorch.nn.utils import chunk_aligned
+from lmdeploy.pytorch.nn.linear import build_colwise_linear
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .patch import add_prefix, get_build_model_context
@@ -33,12 +33,22 @@ class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
         self.layer_type = 'full_attention'
         quantization_config = getattr(config, 'quantization_config', None)
 
+        # Undo builder's KV head replication for non-TP draft model.
+        # The builder sets num_key_value_heads=tp and num_replicate_key_value_heads=tp/original
+        # for the target model's TP sharding. The MTP draft runs without TP (is_tp=False),
+        # so it needs the original (pre-replication) config values to match weight file dims.
+        attn_config = copy.copy(config)
+        num_replicate = getattr(attn_config, 'num_replicate_key_value_heads', 1)
+        if num_replicate > 1:
+            attn_config.num_key_value_heads = attn_config.num_key_value_heads // num_replicate
+            attn_config.num_replicate_key_value_heads = 1
+
         # build attention layer
-        self.self_attn = Qwen3_5Attention(config,
+        self.self_attn = Qwen3_5Attention(attn_config,
                                           layer_idx,
                                           dtype=dtype,
                                           device=device,
-                                          is_tp=True,
+                                          is_tp=False,
                                           prefix=add_prefix('self_attn', prefix=prefix),
                                           )
 
@@ -48,15 +58,16 @@ class Qwen3_5MtpDecoderLayer(Qwen3_5DecoderLayer):
                                                 layer_idx,
                                                 dtype=dtype,
                                                 device=device,
-                                                is_tp=True,
+                                                is_tp=False,
                                                 prefix=add_prefix('mlp', prefix=prefix),
                                                 )
+            self.mlp._all_reduce = False
         else:
             self.mlp = Qwen3_5MLP(config,
                                   dtype=dtype,
                                   device=device,
-                                  is_tp=True,
-                                  all_reduce=True,
+                                  is_tp=False,
+                                  all_reduce=False,
                                   prefix=add_prefix('mlp', prefix=prefix),
                                   )
 
@@ -109,17 +120,15 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # shared with target model
         self.embed_tokens = None
 
-        self.fc = build_rowwise_linear(
+        self.fc = build_colwise_linear(
             config.hidden_size * 2,
             config.hidden_size,
             bias=False,
             dtype=dtype,
             device=device,
-            is_tp=True,
+            is_tp=False,
             quant_config=quantization_config,
-            all_reduce=True,
             dp_disable_tp=True,
-            prefix=add_prefix('fc', prefix=prefix),
         )
 
         # build rotary embedding
@@ -159,12 +168,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         previous_hidden_states = self.pre_fc_norm_hidden(previous_hidden_states)
         hidden_states = torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
-        if getattr(self.fc, 'is_tp', False) and not getattr(self.fc, 'colwise', True):
-            # LMDeploy rowwise linear expects the input feature dimension to be
-            # pre-sharded per TP rank. The draft path still materializes the
-            # concatenated hidden state first, so slice the local shard here.
-            hidden_states = chunk_aligned(hidden_states, self.fc.tp, -1, self.fc.tp_align_size)[self.fc.tp_rank]
-            hidden_states = hidden_states.contiguous()
         hidden_states = self.fc(hidden_states)
 
         # rotary embedding
