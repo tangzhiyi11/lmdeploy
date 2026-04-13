@@ -157,21 +157,6 @@ class SpecModelAgent(BaseSpecModelAgent):
 
     def build_graph_runner(self):
         """Build graph runner."""
-        if self.method == 'qwen3_5_mtp' and self.backend_config.device_type in ['ascend', 'npu']:
-            # TP collectives in the draft MTP path can hang under Ascend NPUGraph capture.
-            # Keep the draft model on the eager runner so the main model can still use graphs.
-            from dataclasses import replace
-            from ..backends.graph_runner import GraphRunner
-            logger.info('Use eager draft runner for qwen3_5_mtp on Ascend.')
-            draft_backend = replace(self.backend_config, eager_mode=True)
-            self.proposer.model = GraphRunner(self.proposer.model,
-                                             model_config=self.model_config,
-                                             cache_config=self.cache_config,
-                                             backend_config=draft_backend,
-                                             device=self.device)
-            self._skip_warmup = True
-            return
-
         self._skip_warmup = False
         backend = get_backend()
         self.proposer.model = backend.build_graph_runner(self.proposer.model,
