@@ -428,6 +428,28 @@ class AscendOpsBackend(DlinferOpsBackend):
         )
         step_context.attn_metadata = attn_metadata
 
+        # Draft model runs non-TP (is_tp=False) with local MoE execution.
+        # Skip the distributed MoE metadata construction that uses global
+        # TP/EP groups — those collectives would corrupt the draft model's
+        # MoE input/output shapes.
+        if is_draft_model:
+            moe_metadata = DlinferMoeMetadata(
+                max_tokens_across_dp=0,
+                pad_size=0,
+                dp_size=1,
+                tp_size=1,
+                ep_size=1,
+                tp_rank=0,
+                ep_rank=0,
+                tp_group=None,
+                ep_group=None,
+                moe_comm_type=DlinferMoECommType.ALLGATHER,
+                x_active_mask=None,
+                moe_group_name=None,
+            )
+            step_context.moe_metadata = moe_metadata
+            return step_context
+
         cls.dist_meta = get_dist_meta()
         actual_tokens_current_rank, padded_tokens_current_rank, max_tokens_across_dp = get_tokens_info(
             cls.dist_meta.dp_size, cls.dist_meta.tp_size, cls.dist_meta.ep_size, cls.dist_meta.ep_group)

@@ -23,6 +23,7 @@ def build_fused_moe(
     layer_idx: int = 0,
     act_func: Callable = None,
     prefix: str = '',
+    is_tp: bool = True,
 ):
     """Fused moe builder."""
     quant_method = None
@@ -44,6 +45,7 @@ def build_fused_moe(
             all_reduce=all_reduce,
             layer_idx=layer_idx,
             act_func=act_func,
+            is_tp=is_tp,
         )
 
     if quant_method == 'smooth_quant':

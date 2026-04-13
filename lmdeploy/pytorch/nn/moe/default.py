@@ -119,12 +119,13 @@ class FusedMoE(FusedMoEBase):
                  device: torch.device | None = None,
                  all_reduce: bool = True,
                  layer_idx: int = 0,
-                 act_func: Callable = None):
+                 act_func: Callable = None,
+                 is_tp: bool = True):
 
         device = device or torch.device('cpu')
         dtype = dtype or torch.float16
         # init distributed tp arguments
-        self.init_dist_args(all_reduce)
+        self.init_dist_args(all_reduce, is_tp=is_tp)
 
         super().__init__(
             tp=self.tp,
@@ -134,7 +135,8 @@ class FusedMoE(FusedMoEBase):
 
         # create implementation
         dist_ctx = get_dist_manager().current_context()
-        self.ep_size, rank = get_ep_world_rank()
+        self.ep_size = 1 if not is_tp else get_ep_world_rank()[0]
+        rank = 0 if not is_tp else get_ep_world_rank()[1]
         impl_builder = get_backend().get_layer_impl_builder(OpType.FusedMoE)
         self.impl = impl_builder.build(
             top_k,
@@ -142,7 +144,7 @@ class FusedMoE(FusedMoEBase):
             renormalize,
             hidden_dim=hidden_dim,
             ep_size=self.ep_size,
-            ep_group=dist_ctx.ep_gpu_group,
+            ep_group=None if not is_tp else dist_ctx.ep_gpu_group,
             layer_idx=layer_idx,
         )
 
@@ -151,7 +153,8 @@ class FusedMoE(FusedMoEBase):
             expert_list = self.impl.ep_expert_list(self.ep_size, rank)
             num_experts = len(expert_list)
         else:
-            hidden_dim, ffn_dim = update_dims(hidden_dim, ffn_dim)
+            if is_tp:
+                hidden_dim, ffn_dim = update_dims(hidden_dim, ffn_dim)
             expert_list = None
         self.expert_list = expert_list
         self.gate_up = LinearWeights(num_experts,
@@ -172,6 +175,22 @@ class FusedMoE(FusedMoEBase):
             bias=bias,
             expert_list=expert_list,
         )
+
+        # When is_tp=False, override the weight_loader to skip TP sharding.
+        # LinearWeights.weight_loader_tp uses get_tp_world_rank('moe') which
+        # returns the global TP config. Use the EP-style loader (direct copy)
+        # instead since the draft model holds full expert weights.
+        if not is_tp and expert_list is None:
+            self.gate_up.weight.weight_loader = self.gate_up.weight_loader_ep
+            self.gate_up.expert_list = list(range(num_experts))
+            self.gate_up.expert_map = defaultdict(list)
+            for i in range(num_experts):
+                self.gate_up.expert_map[i].append(i)
+            self.down.weight.weight_loader = self.down.weight_loader_ep
+            self.down.expert_list = list(range(num_experts))
+            self.down.expert_map = defaultdict(list)
+            for i in range(num_experts):
+                self.down.expert_map[i].append(i)
 
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim

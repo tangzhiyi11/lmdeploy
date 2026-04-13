@@ -81,6 +81,7 @@ class Qwen3_5MoeSparseMoeBlock(nn.Module):
             all_reduce=False,
             layer_idx=layer_idx,
             prefix=add_prefix('experts', prefix),
+            is_tp=is_tp,
         )
 
         self.shared_expert = Qwen3_5MLP(

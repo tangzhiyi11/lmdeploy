@@ -240,8 +240,18 @@ class FusedMoEBase(nn.Module):
         self.tp_mode = tp_mode
         self.do_renormalize = do_renormalize
 
-    def init_dist_args(self, all_reduce: bool):
+    def init_dist_args(self, all_reduce: bool, is_tp: bool = True):
         """Init tp args."""
+        if not is_tp:
+            self.ep = 1
+            self.tp = 1
+            self.tp_rank = 0
+            self.tp_mode = TPMode.DEFAULT
+            self.all_reduce = False
+            self.tp_group = None
+            self.gather_group = None
+            return
+
         dist_ctx = get_dist_manager().current_context()
         dist_cfg = dist_ctx.dist_config
         _, tp_mode = dist_cfg.get_tp_by_layer('moe')
