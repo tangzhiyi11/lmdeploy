@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import os
 from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
@@ -972,7 +973,18 @@ class Qwen3_5TextModel(nn.Module):
 
         # decoding
         residual = None
+        _layer_timers = getattr(self, '_layer_timers', None)
+        _enable_timing = os.environ.get('LMDEPLOY_LAYER_TIMING', '0') == '1'
+        if _enable_timing and _layer_timers is None:
+            import time as _time
+            self._layer_timers = {
+                'full_attn': [], 'linear_attn': [], 'moe': [], 'total': []
+            }
+            _layer_timers = self._layer_timers
         for idx, decoder_layer in enumerate(self.layers):
+            if _enable_timing:
+                import time as _time
+                _t0 = _time.perf_counter()
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
@@ -982,9 +994,42 @@ class Qwen3_5TextModel(nn.Module):
                 gated_delta_meta=gated_delta_meta,
                 all_routed_experts=all_routed_experts,
             )
+            if _enable_timing:
+                _t1 = _time.perf_counter()
+                lt = decoder_layer.layer_type
+                key = 'full_attn' if lt == 'full_attention' else 'linear_attn'
+                _layer_timers[key].append((_t1 - _t0) * 1000)
 
         # norm
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if _enable_timing and _layer_timers is not None:
+            fa = _layer_timers['full_attn']
+            la = _layer_timers['linear_attn']
+            print(f'[LAYER_TIMING] full_attn({len(fa)}): '
+                  f'{sum(fa):.1f}ms avg={sum(fa)/max(len(fa),1):.1f}ms  '
+                  f'linear_attn({len(la)}): '
+                  f'{sum(la):.1f}ms avg={sum(la)/max(len(la),1):.1f}ms  '
+                  f'total: {sum(fa)+sum(la):.1f}ms',
+                  flush=True)
+            _layer_timers['full_attn'].clear()
+            _layer_timers['linear_attn'].clear()
+
+            # GDN sub-component timing (from dlinfer Ascend monkey-patch)
+            _gdn_env = os.environ.get('LMDEPLOY_GDN_TIMING', '0')
+            if _gdn_env == '1':
+                try:
+                    from dlinfer.framework.lmdeploy_ext.device import _gdn_timing as _gt
+                    if any(_gt[k] for k in ('proj', 'conv1d', 'attn', 'norm', 'out')):
+                        _s = '  '.join(
+                            f'{k}={sum(v):.1f}ms({len(v)})'
+                            for k, v in _gt.items() if v
+                        )
+                        print(f'[GDN_SUB_TIMING] {_s}', flush=True)
+                    for k in _gt:
+                        _gt[k].clear()
+                except Exception:
+                    pass
 
         return hidden_states
 
