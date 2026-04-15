@@ -98,7 +98,11 @@ class CudaGraphMixin:
         **kwargs,
     ):
         """Return True is model support cudagraph."""
-        return attn_metadata.is_decoding
+        # Allow both single-token decode and multi-token decode (e.g. MTP
+        # speculative verify) to use graph capture.
+        is_decoding = getattr(attn_metadata, 'is_decoding', False)
+        is_multi_token = getattr(attn_metadata, 'is_multi_token_decoding', False)
+        return is_decoding or is_multi_token
 
     def make_output_buffers(self, output):
         """Make output buffers."""
