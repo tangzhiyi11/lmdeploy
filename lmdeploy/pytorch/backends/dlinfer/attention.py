@@ -19,6 +19,7 @@ class DlinferAttentionMetadata(AttentionMetadata):
     quant_meta: dict = None
     cu_seq_lens_kv: Tensor | None = None
     has_initial_state: Tensor | None = None
+    is_multi_token_decoding: bool = False
 
 
 class DlinferAttentionImpl(AttentionImpl[DlinferAttentionMetadata]):

@@ -156,19 +156,20 @@ class AscendOpsBackend(DlinferOpsBackend):
 
         block_num, block_size, *_ = step_context.kv_caches[0][0].shape
         is_draft_model = getattr(step_context, 'is_draft_model', False)
-        # The main model may keep graph capture enabled while the draft model
-        # runs on the eager runner. Keep graph-sensitive metadata logic local
-        # to the current context instead of inheriting the global target state.
-        context_enable_graph = cls.enable_graph and not is_draft_model
+        # Draft model with is_tp=False has no collective operations, so graph
+        # capture is safe and should be enabled when the global flag allows it.
+        # The MoE early-return (below) prevents the draft model from entering
+        # the distributed MoE paths that assume TP/EP groups.
+        context_enable_graph = cls.enable_graph
         is_unpaged_prefill = False
         is_multi_token_decoding = False
         if not step_context.is_decoding:
             is_unpaged_prefill = all((step_context.q_seqlens == step_context.kv_seqlens).tolist())
         else:
             # Speculative decoding on the main model can decode multiple tokens
-            # per sequence in one step. Ascend dlinfer's "decoding" path assumes
-            # exactly one token per sequence, so route multi-token decoding
-            # through the paged-prefill semantics instead.
+            # per sequence in one step.  Route multi-token decoding through the
+            # paged-prefill path which already handles per-token kv_seq_len
+            # expansion correctly via paged_prefill_attention.
             is_multi_token_decoding = torch.max(step_context.q_seqlens).item() > 1
         effective_is_decoding = step_context.is_decoding and not is_multi_token_decoding
         if step_context.block_offsets.dtype != torch.int32:
@@ -425,6 +426,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             quant_policy=step_context.kv_quant_policy,
             quant_meta=AscendKVQuantMeta.quant_meta,
             has_initial_state=has_initial_state,
+            is_multi_token_decoding=is_multi_token_decoding,
         )
         step_context.attn_metadata = attn_metadata
 

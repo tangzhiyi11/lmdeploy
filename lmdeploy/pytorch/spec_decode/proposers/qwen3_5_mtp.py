@@ -15,6 +15,9 @@ class Qwen3_5MTP(DeepseekMTP):
     def build_model(self, empty_init: bool, target_model: torch.nn.Module = None, build_model_ctx=None):
         super().build_model(empty_init, target_model=target_model, build_model_ctx=build_model_ctx)
         logger.info('Using embed_tokens from target model.')
+        # vLLM MTP invariant: MTP shares embed_tokens and lm_head with target.
+        # We already share embed_tokens here; lm_head sharing is handled by
+        # the base class build_model implementation.
         target_emb = target_model.get_input_embeddings()
         model = self.model
         if hasattr(model, 'set_input_embeddings'):

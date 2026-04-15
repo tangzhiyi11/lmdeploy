@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import inspect
+import os
+import time
 
 import torch
 from torch.profiler import record_function
@@ -120,6 +122,9 @@ class SpecModelAgent(BaseSpecModelAgent):
         self.inputs_strategy = inputs_strategy
         self.agent_strategy = agent_strategy
         self.misc_config = misc_config
+        # Non-TP draft model: each rank holds full weights and runs
+        # independently — no collective ops, no broadcast needed.
+        self.is_draft_tp = False
         self.rejection_sampler = RejectionSampler()
         self.proposer = build_specdecode_proposer(specdecode_config, device=device)
         self.method = specdecode_config.method
@@ -179,6 +184,11 @@ class SpecModelAgent(BaseSpecModelAgent):
 
     def _prepare_inputs_from_main(self, model_inputs: ModelInputs, extra_inputs: ExtraInputs):
         """Update inputs from main model inputs."""
+        spec_debug = os.environ.get('LMDEPLOY_SPEC_DEBUG', '0') == '1'
+        spec_debug_steps = int(os.environ.get('LMDEPLOY_SPEC_DEBUG_STEPS', '4'))
+        if not hasattr(self, '_spec_debug_prepare_step'):
+            self._spec_debug_prepare_step = 0
+
         next_token_ids = extra_inputs.next_token_ids
         last_token_indices = extra_inputs.last_token_indices
         # create new inputs for draft model (offset by 1 from main model)
@@ -194,15 +204,33 @@ class SpecModelAgent(BaseSpecModelAgent):
 
         if not model_inputs.is_chunk:
             # Case A: non-chunked — shift left by 1, place next_token at end
+            if spec_debug and self._spec_debug_prepare_step < spec_debug_steps:
+                dist_ctx = get_dist_manager().current_context()
+                rank = 0 if dist_ctx is None else dist_ctx.rank
+                if rank == 0:
+                    print(
+                        f'[SPEC_DEBUG_PREP][step={self._spec_debug_prepare_step}] '
+                        f'is_decoding={model_inputs.is_decoding} '
+                        f'input_ids_shape={tuple(model_inputs.input_ids.shape)} '
+                        f'seq_length={model_inputs.seq_length.tolist()} '
+                        f'last_token_indices={last_token_indices.tolist() if last_token_indices is not None else None} '
+                        f'next_token_ids={next_token_ids.tolist() if next_token_ids is not None else None} '
+                        f'mrope_pos_ids_shape={None if mrope_pos_ids is None else tuple(mrope_pos_ids.shape)}',
+                        flush=True,
+                    )
             input_ids = model_inputs.input_ids.clone()
             input_ids[:, :-1] = model_inputs.input_ids[:, 1:]
-            input_ids[:, last_token_indices] = next_token_ids
+            # In spec decoding, the draft model input window has a fixed width
+            # (num_spec_tokens + 1). We always place the sampled next token at
+            # the last position, regardless of how many speculative tokens were
+            # rejected this step.
+            input_ids[:, -1] = next_token_ids
 
             if target_inputs_embeds is not None:
                 input_embeds = target_inputs_embeds.clone()
                 input_embeds[:, :-1, :] = target_inputs_embeds[:, 1:, :]
                 next_token_embeds = self.proposer.embed_input_ids(next_token_ids)
-                input_embeds[:, last_token_indices, :] = next_token_embeds
+                input_embeds[:, -1, :] = next_token_embeds
                 target_inputs_embeds = input_embeds
 
         else:
@@ -291,6 +319,17 @@ class SpecModelAgent(BaseSpecModelAgent):
             target_position_ids=None,
             last_token_indices=last_token_indices,
         )
+        if spec_debug and self._spec_debug_prepare_step < spec_debug_steps:
+            dist_ctx = get_dist_manager().current_context()
+            rank = 0 if dist_ctx is None else dist_ctx.rank
+            if rank == 0:
+                ids_preview = new_model_inputs.input_ids[0, :min(new_model_inputs.input_ids.shape[1], 16)].tolist()
+                print(
+                    f'[SPEC_DEBUG_PREP][step={self._spec_debug_prepare_step}] '
+                    f'new_input_ids_preview={ids_preview}',
+                    flush=True,
+                )
+        self._spec_debug_prepare_step += 1
         return new_model_inputs, new_extra_inputs
 
     def _prepare_long_context_chunk_save_last(self, key, tensor):
@@ -325,6 +364,10 @@ class SpecModelAgent(BaseSpecModelAgent):
         """
         with record_function('spec_sampling_logits'):
             batch_size, num_tokens, vocab_size = target_logits.shape
+            inv_debug = os.environ.get("LMDEPLOY_SPEC_INVARIANT_DEBUG", "0") == "1"
+            inv_steps = int(os.environ.get("LMDEPLOY_SPEC_INVARIANT_STEPS", "2"))
+            if inv_debug and not hasattr(self, "_inv_sampling_step"):
+                self._inv_sampling_step = 0
 
             # Reshape to 2D: [batch * num_tokens, vocab]
             flat_logits = target_logits.reshape(-1, vocab_size)
@@ -339,6 +382,23 @@ class SpecModelAgent(BaseSpecModelAgent):
 
             # Slice bonus (last) position logits for each batch element
             bonus_logits = processed_logits[num_tokens - 1::num_tokens]  # [batch_size, vocab]
+            if inv_debug and self._inv_sampling_step < inv_steps:
+                dist_ctx = get_dist_manager().current_context()
+                rank = 0 if dist_ctx is None else dist_ctx.rank
+                if rank == 0:
+                    try:
+                        # Show which flat indices correspond to batch0 columns.
+                        idxs = list(range(0, num_tokens))
+                        bonus_flat_idx = num_tokens - 1
+                        print(
+                            f"[INV][sampling_logits][step={self._inv_sampling_step}] "
+                            f"target_logits_shape={tuple(target_logits.shape)} "
+                            f"flat_logits_shape={tuple(flat_logits.shape)} "
+                            f"batch0_flat_cols={idxs} bonus_flat_col={bonus_flat_idx}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
 
             # Create a per-batch processor for bonus token sampling
             # by slicing the expanded sampling_inputs back to batch_size
@@ -352,12 +412,31 @@ class SpecModelAgent(BaseSpecModelAgent):
 
             # Reshape back to 3D
             processed_logits = processed_logits.view(batch_size, num_tokens, vocab_size)
+            if inv_debug and self._inv_sampling_step < inv_steps:
+                dist_ctx = get_dist_manager().current_context()
+                rank = 0 if dist_ctx is None else dist_ctx.rank
+                if rank == 0:
+                    try:
+                        # Argmax of bonus column for batch0, purely for alignment sanity.
+                        bonus_argmax = int(processed_logits[0, -1].argmax(dim=-1).item())
+                        print(
+                            f"[INV][sampling_logits][step={self._inv_sampling_step}] "
+                            f"batch0_bonus_argmax={bonus_argmax}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                self._inv_sampling_step += 1
 
         return processed_logits, next_token_ids, raw_logprobs
 
     async def _rejection_sampling(self, model_inputs: 'ModelInputs', extra_inputs: ARSpecExtraInputs,
                                   sampling_inputs: SamplingInputs):
         """Do rejection sampling."""
+        spec_debug = os.environ.get('LMDEPLOY_SPEC_DEBUG', '0') == '1'
+        spec_debug_steps = int(os.environ.get('LMDEPLOY_SPEC_DEBUG_STEPS', '4'))
+        if not hasattr(self, '_spec_debug_step'):
+            self._spec_debug_step = 0
 
         @torch.inference_mode()
         def __compute_logprobs(raw_logprobs: torch.Tensor, token_ids: torch.LongTensor,
@@ -382,6 +461,7 @@ class SpecModelAgent(BaseSpecModelAgent):
         # Process target_logits via FusedLogitsProcessor for BOTH prefill and decoding
         target_logits = extra_inputs.target_logits
         num_tokens = target_logits.shape[1]
+        vocab_size = target_logits.shape[-1]
         expanded_sampling_inputs = _expand_sampling_inputs(sampling_inputs, num_tokens)
         processed_logits, next_token_ids, raw_logprobs = await self.async_sampling_logits(
             target_logits, expanded_sampling_inputs)
@@ -395,14 +475,42 @@ class SpecModelAgent(BaseSpecModelAgent):
             target_logits = processed_logits[:, :-1].contiguous()  # [batch, num_spec, vocab]
             num_tokens = self.num_spec_tokens + 1
             batch_sampling_inputs = _slice_sampling_inputs(expanded_sampling_inputs, num_tokens, is_last=False)
+            # Process draft logits with the same sampling parameters to get q(x).
+            draft_probs = None
+            if extra_inputs.output_draft_logits is not None:
+                flat_draft = extra_inputs.output_draft_logits.reshape(-1, vocab_size)
+                draft_processor = FusedLogitsProcessor(
+                    batch_sampling_inputs,
+                    logprobs_mode=self.misc_config.logprobs_mode,
+                )
+                processed_draft_flat, _ = await draft_processor(flat_draft)
+                batch_size = target_logits.shape[0]
+                processed_draft = processed_draft_flat.view(batch_size, -1, vocab_size)
+                draft_probs = processed_draft.softmax(dim=-1, dtype=torch.float32).contiguous()
             output_token_ids, num_rejected_tokens, next_token_ids = self.rejection_sampler(
                 target_logits,
                 extra_inputs.output_draft_token_ids,
                 next_token_ids,
                 sampling_inputs=batch_sampling_inputs,
+                draft_probs=draft_probs,
             )
             # update last token indices
             last_token_indices = last_token_indices - num_rejected_tokens
+
+        if spec_debug and self._spec_debug_step < spec_debug_steps:
+            dist_ctx = get_dist_manager().current_context()
+            rank = 0 if dist_ctx is None else dist_ctx.rank
+            if rank == 0:
+                print(
+                    f'[SPEC_DEBUG][step={self._spec_debug_step}] '
+                    f'is_decoding={model_inputs.is_decoding} '
+                    f'seq_length={model_inputs.seq_length.tolist()} '
+                    f'last_token_indices={last_token_indices.tolist()} '
+                    f'num_rejected_tokens={num_rejected_tokens.tolist()} '
+                    f'next_token_ids={next_token_ids.tolist()} '
+                    f'output_token_ids={output_token_ids.tolist()}',
+                    flush=True,
+                )
 
         logprobs = __compute_logprobs(raw_logprobs, output_token_ids, sampling_inputs)
 
@@ -414,6 +522,7 @@ class SpecModelAgent(BaseSpecModelAgent):
             target_logits=None,  # clear for next step
             logprobs=logprobs,
         )
+        self._spec_debug_step += 1
         return new_extra_inputs
 
     def _forward_impl(self, inputs: ModelInputs):
@@ -427,15 +536,27 @@ class SpecModelAgent(BaseSpecModelAgent):
         Args:
             inputs (dict): The input data comes from _make_inputs.
         """
+        t_fwd0 = time.perf_counter()
         outputs = self._forward_impl(inputs)
+        t_fwd1 = time.perf_counter()
+        print(f'[DRAFT_FWD] 1st forward: {1000*(t_fwd1-t_fwd0):.1f}ms', flush=True)
         if inputs.is_chunk and not inputs.is_last_chunk:
             # create dummy draft tokens
             output_draft_ids = inputs.input_ids.new_zeros(1, self.num_spec_tokens)
         else:
             loop_count = self.num_spec_tokens - 1
-            draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(
+            draft_token_ids, draft_logits, model_metas, target_hidden_states = self.proposer.get_outputs(
                 outputs, inputs, extra_inputs)
+            if os.environ.get('LMDEPLOY_SPEC_DEBUG', '0') == '1':
+                dist_ctx = get_dist_manager().current_context()
+                rank = 0 if dist_ctx is None else dist_ctx.rank
+                if rank == 0:
+                    try:
+                        print(f'[SPEC_DEBUG_DRAFT] draft_token_ids[0]={draft_token_ids[0].tolist()}', flush=True)
+                    except Exception:
+                        print(f'[SPEC_DEBUG_DRAFT] draft_token_ids_shape={tuple(draft_token_ids.shape)}', flush=True)
             draft_tokens_li = [draft_token_ids]
+            draft_logits_li = [draft_logits.unsqueeze(1)]
             if loop_count > 0:
                 inputs = self.proposer.update_inputs_decoding(inputs, extra_inputs, draft_token_ids.transpose(0, 1),
                                                               target_hidden_states, model_metas)
@@ -444,8 +565,10 @@ class SpecModelAgent(BaseSpecModelAgent):
 
                 for loop_idx in range(loop_count):
                     outputs = self._forward_impl(inputs)
-                    draft_token_ids, model_metas, target_hidden_states = self.proposer.get_outputs(outputs, inputs)
+                    draft_token_ids, draft_logits, model_metas, target_hidden_states = self.proposer.get_outputs(
+                        outputs, inputs)
                     draft_tokens_li.append(draft_token_ids)
+                    draft_logits_li.append(draft_logits.unsqueeze(1))
                     if loop_idx < loop_count - 1:
                         step_seqlens = inputs.seq_length.new_ones(inputs.seq_length.size(0))
                         inputs = inputs.step(draft_token_ids.transpose(0, 1), step_seqlens)
@@ -457,10 +580,12 @@ class SpecModelAgent(BaseSpecModelAgent):
                             inputs.mrope_pos_ids += 1
 
             output_draft_ids = torch.cat(draft_tokens_li, dim=-1)
+            output_draft_logits = torch.cat(draft_logits_li, dim=1)
 
         # create new extra inputs
         extra_inputs = ARSpecExtraInputs(
             output_draft_token_ids=output_draft_ids,
+            output_draft_logits=output_draft_logits if not (inputs.is_chunk and not inputs.is_last_chunk) else None,
             next_token_ids=extra_inputs.next_token_ids,
             num_rejected_tokens=extra_inputs.num_rejected_tokens,
             output_token_ids=extra_inputs.output_token_ids,
@@ -473,6 +598,13 @@ class SpecModelAgent(BaseSpecModelAgent):
         """Share leader rejection outputs before all-rank draft forward."""
         dist_ctx = get_dist_manager().current_context()
         if dist_ctx is None or dist_ctx.dist_config.attn_tp <= 1:
+            return extra_inputs.ensure_draft_runtime_inputs(model_inputs)
+
+        # Non-TP draft model: each rank independently computes the same
+        # rejection-sampling results from identical target_logits, so no
+        # broadcast is needed.  Skipping the broadcast eliminates a
+        # synchronisation barrier that would otherwise stall all ranks.
+        if not self.is_draft_tp:
             return extra_inputs.ensure_draft_runtime_inputs(model_inputs)
 
         sync_fn = getattr(self.agent_strategy, 'sync_draft_runtime_inputs', None)
@@ -512,11 +644,17 @@ class SpecModelAgent(BaseSpecModelAgent):
         do_rejection_sampling: bool = True,
     ):
         """Draft model forward."""
+        t0 = time.perf_counter()
         draft_extra_inputs = await self.run_rejection_sampling(model_inputs,
                                                                extra_inputs,
                                                                sampling_inputs,
                                                                enabled=do_rejection_sampling)
-        return await self.run_draft_forward(model_inputs, draft_extra_inputs, sampling_inputs)
+        t1 = time.perf_counter()
+        result = await self.run_draft_forward(model_inputs, draft_extra_inputs, sampling_inputs)
+        t2 = time.perf_counter()
+        print(f'[SPEC_PERF] rejection={1000*(t1-t0):.1f}ms  draft_fwd={1000*(t2-t1):.1f}ms  '
+              f'total={1000*(t2-t0):.1f}ms  is_decoding={model_inputs.is_decoding}', flush=True)
+        return result
 
     def _make_warmup_inputs(
         self,
@@ -573,6 +711,8 @@ class SpecModelAgent(BaseSpecModelAgent):
 
         for batch_size in capture_batch_sizes:
             # decode with num_spec_tokens + 1 per seq
+            # Multi-token shapes bypass graph capture in AscendGraphRunner
+            # and run in eager mode.
             inputs = self._make_warmup_inputs(
                 batch_size,
                 is_decoding=True,

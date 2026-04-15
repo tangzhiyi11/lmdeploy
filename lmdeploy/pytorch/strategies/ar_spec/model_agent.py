@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import Any
 
+import os
 import torch
 import torch.distributed as dist
 from torch.profiler import record_function
@@ -32,6 +33,7 @@ class ARSpecExtraInputs(ExtraInputs):
 
     # draft model outputs
     output_draft_token_ids: torch.Tensor = None
+    output_draft_logits: torch.Tensor = None
     num_rejected_tokens: torch.Tensor = None
     output_token_ids: torch.Tensor = None
     logprobs: Any = None
@@ -82,16 +84,24 @@ class ARSpecExtraInputs(ExtraInputs):
     def merge(self, other: 'ARSpecExtraInputs'):
         """Merge extra inputs."""
         self.output_draft_token_ids = torch.cat([self.output_draft_token_ids, other.output_draft_token_ids], dim=0)
+        if self.output_draft_logits is not None and other.output_draft_logits is not None:
+            self.output_draft_logits = torch.cat([self.output_draft_logits, other.output_draft_logits], dim=0)
         self.num_rejected_tokens = torch.cat([self.num_rejected_tokens, other.num_rejected_tokens], dim=0)
         return ARSpecExtraInputs(output_draft_token_ids=self.output_draft_token_ids,
+                                 output_draft_logits=self.output_draft_logits,
                                  num_rejected_tokens=self.num_rejected_tokens)
 
     def update(self, delta: 'ModelInputsDelta'):
         """Update stopping criteria."""
         indices = delta.indices
         output_draft_token_ids = self.output_draft_token_ids[indices]
+        output_draft_logits = None
+        if self.output_draft_logits is not None:
+            output_draft_logits = self.output_draft_logits[indices]
         num_rejected_tokens = self.num_rejected_tokens[indices]
-        return ARSpecExtraInputs(output_draft_token_ids=output_draft_token_ids, num_rejected_tokens=num_rejected_tokens)
+        return ARSpecExtraInputs(output_draft_token_ids=output_draft_token_ids,
+                                 output_draft_logits=output_draft_logits,
+                                 num_rejected_tokens=num_rejected_tokens)
 
 
 @dataclass
@@ -229,8 +239,27 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
         extra_outputs: ARSpecExtraOutputs,
     ) -> tuple['ModelInputs', ARSpecExtraInputs]:
         """Step next decoding."""
+        inv_debug = os.environ.get("LMDEPLOY_SPEC_INVARIANT_DEBUG", "0") == "1"
+        inv_steps = int(os.environ.get("LMDEPLOY_SPEC_INVARIANT_STEPS", "2"))
+        if inv_debug and not hasattr(self, "_inv_step"):
+            self._inv_step = 0
+
+        # Verification window: [next_token, d0, d1, ..., dN-1]
+        # next_token must be at position 0 because the main model's KV cache
+        # does not yet contain it; the model needs to process it first so that
+        # logits[0] correctly predicts d0.
         next_token_ids = next_token_ids[:, None]
         next_token_ids = torch.cat([next_token_ids, extra_outputs.draft_token_ids], dim=-1)
+        if inv_debug and self._inv_step < inv_steps:
+            try:
+                print(
+                    f"[INV][prefill_to_decode][step={self._inv_step}] "
+                    f"draft_tokens(batch0)={extra_outputs.draft_token_ids[0].tolist()} "
+                    f"window_token_ids(batch0)={next_token_ids[0].tolist()}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         max_q_seqlen = next_token_ids.size(-1)
         next_token_ids = next_token_ids.flatten()[None, :]
         inputs = get_model_inputs_next_decoding(model_inputs,
@@ -246,25 +275,74 @@ class ARSpecModelAgentStrategy(ModelAgentStrategy):
             inputs.mrope_pos_ids = mrope_pos_ids.flatten(1, 2)
 
         extra_inputs = extra_inputs.clone()
+        if inv_debug and self._inv_step < inv_steps:
+            try:
+                ids_preview = inputs.input_ids[0, :min(inputs.input_ids.shape[1], 16)].tolist()
+                mrope_preview = None
+                if inputs.mrope_pos_ids is not None:
+                    # mrope_pos_ids shape: (3, sum_seqlens)
+                    mrope_preview = inputs.mrope_pos_ids[:, :min(inputs.mrope_pos_ids.shape[1], 8)].tolist()
+                print(
+                    f"[INV][prefill_to_decode][step={self._inv_step}] "
+                    f"flatten_input_ids_preview={ids_preview} "
+                    f"mrope_pos_ids_preview={mrope_preview}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            self._inv_step += 1
         return inputs, extra_inputs
 
     def update_decoding_for_next_step(self, model_inputs: 'ModelInputs', next_token_ids: torch.Tensor, model_metas: Any,
                                       extra_inputs: ARSpecExtraInputs, extra_outputs: ARSpecExtraOutputs):
         """Step next inputs."""
+        inv_debug = os.environ.get("LMDEPLOY_SPEC_INVARIANT_DEBUG", "0") == "1"
+        inv_steps = int(os.environ.get("LMDEPLOY_SPEC_INVARIANT_STEPS", "2"))
+        if inv_debug and not hasattr(self, "_inv_decode_step"):
+            self._inv_decode_step = 0
+
         model_inputs.model_metas = model_metas
         step_seqlens = model_inputs.seq_length
         batch_size = step_seqlens.size(0)
 
-        # update extra inputs
-        extra_inputs.output_token_ids = extra_outputs.draft_token_ids
+        # extra_inputs.output_token_ids is produced by rejection sampling and
+        # should not be overwritten here.
 
         # update inputs
         step_seqlens = model_inputs.seq_length - extra_inputs.num_rejected_tokens
         input_ids = next_token_ids.new_empty((batch_size, self.num_spec_tokens + 1))
+        # Verification window: [next_token, d0, d1, ..., dN-1]
         input_ids[:, 0] = next_token_ids
         input_ids[:, 1:] = extra_inputs.output_draft_token_ids
+        if inv_debug and self._inv_decode_step < inv_steps:
+            try:
+                print(
+                    f"[INV][decode_step][step={self._inv_decode_step}] "
+                    f"output_draft_token_ids(batch0)={extra_inputs.output_draft_token_ids[0].tolist()} "
+                    f"bonus_next_token(batch0)={int(next_token_ids[0].item())} "
+                    f"window_token_ids(batch0)={input_ids[0].tolist()} "
+                    f"num_rejected_tokens(batch0)={int(extra_inputs.num_rejected_tokens[0].item())}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         input_ids = input_ids.flatten()[None, :]
         model_inputs = model_inputs.step(input_ids, step_seqlens)
+        if inv_debug and self._inv_decode_step < inv_steps:
+            try:
+                ids_preview = model_inputs.input_ids[0, :min(model_inputs.input_ids.shape[1], 16)].tolist()
+                mrope_preview = None
+                if model_inputs.mrope_pos_ids is not None:
+                    mrope_preview = model_inputs.mrope_pos_ids[:, :min(model_inputs.mrope_pos_ids.shape[1], 8)].tolist()
+                print(
+                    f"[INV][decode_step][step={self._inv_decode_step}] "
+                    f"stepped_input_ids_preview={ids_preview} "
+                    f"mrope_pos_ids_preview={mrope_preview}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            self._inv_decode_step += 1
         return model_inputs, extra_inputs
 
     def post_sampling(self, inputs: 'ModelInputs', logits: torch.Tensor, next_token_ids: torch.LongTensor,

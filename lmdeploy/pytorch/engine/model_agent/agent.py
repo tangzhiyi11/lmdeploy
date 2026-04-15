@@ -157,6 +157,7 @@ def model_forward(
     with torch.cuda.stream(stream), step_ctx_manager(model.ctx_mgr):
         # forward
         ctx_mgr = model.ctx_mgr
+        _t_build_ctx = time.perf_counter()
         context = ctx_mgr.build_context(
             inputs=inputs,
             model_config=cache_engine.model_config,
@@ -165,6 +166,7 @@ def model_forward(
             state_caches=state_cache_engine.state_caches,
             kv_quant_policy=cache_engine.cache_config.quant_policy,
         )
+        _t_build_ctx_end = time.perf_counter()
 
         with ctx_mgr.context(context):
             # initialize cache for ssm
@@ -181,7 +183,12 @@ def model_forward(
                 past_key_values=cache_engine.gpu_cache,
                 context=context,
             )
+            _t_fwd_start = time.perf_counter()
             output = model(**input_dict)
+            _t_fwd_end = time.perf_counter()
+            print(f'[MODEL_INNER] build_ctx={1000*(_t_build_ctx_end-_t_build_ctx):.1f}ms '
+                  f'fwd={1000*(_t_fwd_end-_t_fwd_start):.1f}ms '
+                  f'is_decoding={inputs.is_decoding}', flush=True)
             if not isinstance(output, dict):
                 output = dict(hidden_states=output)
             # InternVL-3.5-Flash will change the seqlen, model_metas during forward
@@ -527,6 +534,13 @@ class BaseModelAgent:
         return_logits: bool,
     ):
         """Model forward."""
+        # NOTE: Split decode (splitting multi-token decode into sequential
+        # single-token forwards) does NOT work on Ascend NPU because the
+        # decode attention kernel produces significantly different numerical
+        # results from the paged-prefill attention kernel (hidden_states diff
+        # >10).  Multi-token decode is instead routed through the existing
+        # paged_prefill_attention path in dlinfer, which detects max_q_seqlen>1
+        # and calls decode_attention with per-token kv_seq_len expansion.
         origin_inputs = inputs
         ret = await self.async_forward(inputs)
 
@@ -538,6 +552,15 @@ class BaseModelAgent:
         logits = self.get_logits(hidden_states)
         ret['logits'] = logits
         return ret
+
+    @torch.inference_mode()
+    def _forward_split_decode(self, inputs: ModelInputs):
+        """Split multi-token decode into sequential single-token forwards.
+
+        NOTE: Disabled on Ascend NPU due to numerical differences between
+        decode and prefill attention kernels.  Kept for future reference.
+        """
+        raise NotImplementedError("Split decode is disabled on Ascend NPU")
 
     async def async_sampling_logits(self, logits: torch.Tensor, sampling_inputs: SamplingInputs):
         """Sampling logits."""
@@ -695,7 +718,10 @@ class BaseModelAgent:
         # sampling + spec decoding
         if self.spec_agent.is_enabled():
             # spec_agent handles sampling + logprobs + rejection sampling internally
+            t_spec0 = time.perf_counter()
             extra_inputs = await self.spec_agent.async_model_forward(inputs, extra_inputs, sampling_inputs)
+            t_spec1 = time.perf_counter()
+            print(f'[STEP_PERF] spec_total={1000*(t_spec1-t_spec0):.1f}ms', flush=True)
             next_token_ids = extra_inputs.next_token_ids
             output_token_ids = extra_inputs.output_token_ids
             logprobs = extra_inputs.logprobs
@@ -852,10 +878,14 @@ class BaseModelAgent:
                      f'batch_size={inputs.seq_length.size(0)} '
                      f'num_tokens={inputs.input_ids.size(-1)} '
                      f'is_decoding={inputs.is_decoding}')
+        t_main_fwd0 = time.perf_counter()
         output = await self._async_model_forward(
             inputs,
             return_logits=return_logits,
         )
+        t_main_fwd1 = time.perf_counter()
+        print(f'[MAIN_PERF] main_fwd={1000*(t_main_fwd1-t_main_fwd0):.1f}ms  '
+              f'is_decoding={inputs.is_decoding}', flush=True)
         # recovery is_decoding
         inputs.is_decoding = is_decoding
 

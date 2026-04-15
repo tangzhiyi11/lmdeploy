@@ -4,6 +4,7 @@ import copy
 from collections.abc import Iterable
 from typing import Any
 
+import os
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -96,6 +97,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         super().__init__()
         self.config = config
         self.dtype = dtype
+        # Keep MTP layer indices aligned with checkpoint naming.
+        # For Qwen3.5 MTP checkpoints used in this workspace, MTP layers are
+        # stored starting from layers.0 under the MTP predictor module.
         self.mtp_start_layer_idx = 0
         self.num_mtp_layers = config.mtp_num_hidden_layers
         # to map the exact layer index from weights
@@ -154,6 +158,11 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        mtp_debug = os.environ.get("LMDEPLOY_MTP_DEBUG", "0") == "1"
+        mtp_debug_steps = int(os.environ.get("LMDEPLOY_MTP_DEBUG_STEPS", "2"))
+        if mtp_debug and not hasattr(self, "_mtp_debug_step"):
+            self._mtp_debug_step = 0
+
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         layer_idx = self.mtp_start_layer_idx + current_step_idx
         past_key_value = past_key_values[current_step_idx]
@@ -170,11 +179,39 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         hidden_states = torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         hidden_states = self.fc(hidden_states)
 
+        if mtp_debug and self._mtp_debug_step < mtp_debug_steps:
+            try:
+                inp0 = input_ids[0, :min(input_ids.shape[1], 8)].tolist()
+            except Exception:
+                inp0 = None
+            pos_shape = tuple(position_ids.shape) if isinstance(position_ids, torch.Tensor) else None
+            mrope_shape = tuple(mrope_position_ids.shape) if isinstance(mrope_position_ids, torch.Tensor) else None
+            try:
+                pkv_shapes = [tuple(t.shape) for t in past_key_value] if isinstance(past_key_value, (list, tuple)) else None
+            except Exception:
+                pkv_shapes = None
+            try:
+                ph_norm = float(previous_hidden_states.float().norm().item())
+            except Exception:
+                ph_norm = None
+            print(
+                f"[MTP_DEBUG][step={self._mtp_debug_step}] spec_step_idx={spec_step_idx} "
+                f"current_step_idx={current_step_idx} layer_idx={layer_idx} "
+                f"input_ids_preview={inp0} pos_shape={pos_shape} mrope_shape={mrope_shape} "
+                f"prev_h_norm={ph_norm} fc_out_shape={tuple(hidden_states.shape)} pkv_shapes={pkv_shapes}",
+                flush=True,
+            )
+
         # rotary embedding
         if mrope_position_ids is None:
             cos, sin = self.rotary_emb(hidden_states, position_ids)
         else:
-            mrope_position_ids = mrope_position_ids.unsqueeze(1)
+            # Draft path receives packed MRoPE ids shaped like (3, sum_seqlens).
+            # Convert to the rotary embedding expected (3, 1, sum_seqlens).
+            if mrope_position_ids.ndim == 2:
+                mrope_position_ids = mrope_position_ids.unsqueeze(1)
+            elif mrope_position_ids.ndim != 3:
+                raise ValueError(f'Unexpected mrope_position_ids shape: {tuple(mrope_position_ids.shape)}')
             cos, sin = self.rotary_emb(hidden_states, mrope_position_ids)
 
         cos, sin = cos[0], sin[0]
@@ -188,6 +225,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             all_routed_experts=all_routed_experts,
         )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if mtp_debug:
+            self._mtp_debug_step += 1
         return hidden_states
 
 

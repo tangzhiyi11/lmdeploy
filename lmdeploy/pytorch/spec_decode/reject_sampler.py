@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 import torch
 import triton
 import triton.language as tl
@@ -404,6 +405,26 @@ def _rejection_sample_ascend(
                                               num_spec_tokens,
                                               is_greedy)
         if is_all_greedy:
+            if os.environ.get('LMDEPLOY_SPEC_DEBUG', '0') == '1':
+                # Print only tiny info (rank0 assumed by caller context).
+                try:
+                    draft_preview = draft_token_ids[0].tolist()
+                except Exception:
+                    draft_preview = None
+                try:
+                    # target_argmax is flattened; take first batch's spec tokens.
+                    targ_preview = target_argmax[:num_spec_tokens].tolist()
+                except Exception:
+                    targ_preview = None
+                try:
+                    bonus_preview = bonus_token_ids.view(-1).tolist()
+                except Exception:
+                    bonus_preview = None
+                print(
+                    f'[SPEC_DEBUG_RS] greedy batch0 draft={draft_preview} '
+                    f'target_argmax={targ_preview} bonus={bonus_preview}',
+                    flush=True,
+                )
             return _extract_outputs(output_token_ids, num_spec_tokens)
 
     target_probs_flat = target_logits_flat.softmax(dim=-1, dtype=torch.float32)
