@@ -219,19 +219,70 @@ class SpecModelAgent(BaseSpecModelAgent):
                         flush=True,
                     )
             input_ids = model_inputs.input_ids.clone()
-            input_ids[:, :-1] = model_inputs.input_ids[:, 1:]
             # In spec decoding, the draft model input window has a fixed width
             # (num_spec_tokens + 1). We always place the sampled next token at
             # the last position, regardless of how many speculative tokens were
             # rejected this step.
-            input_ids[:, -1] = next_token_ids
+            num_seqs = seq_length.size(0)
+            total_tokens = input_ids.size(-1)
+            window_size = total_tokens // num_seqs
+            if num_seqs == 1:
+                # Single-sequence: simple global shift works
+                input_ids[:, :-1] = model_inputs.input_ids[:, 1:]
+                input_ids[:, -1] = next_token_ids
+            elif not model_inputs.is_decoding:
+                # Prefill multi-batch: per-sequence shift-left preserving total
+                # token count so input_ids shape matches target_hidden_states.
+                # For each sequence [t0, t1, ..., tL-1] → [t1, ..., tL-1, next].
+                seq_lengths = model_inputs.seq_length
+                starts = torch.zeros_like(seq_lengths)
+                starts[1:] = seq_lengths[:-1].cumsum(0)
+                ends = seq_lengths.cumsum(0)
+                shifted_parts = []
+                for i in range(num_seqs):
+                    s, e = starts[i].item(), ends[i].item()
+                    shifted_parts.append(torch.cat([
+                        model_inputs.input_ids[0, s + 1:e],
+                        next_token_ids[i:i + 1],
+                    ]))
+                input_ids = torch.cat(shifted_parts).unsqueeze(0)
+            else:
+                # Decode multi-batch: window-based rearrangement.
+                # Each seq has window_size = num_spec_tokens + 1 tokens.
+                # Verify layout: [next_seq0, d0_seq0, next_seq1, d0_seq1, ...]
+                # Draft layout:  [d0_seq0, new_seq0, d0_seq1, new_seq1, ...]
+                d0_old = model_inputs.input_ids[0,
+                            torch.arange(num_seqs, device=input_ids.device) * window_size + 1]
+                draft_tokens = torch.stack([d0_old, next_token_ids], dim=1).flatten()
+                input_ids = draft_tokens.unsqueeze(0)
 
             if target_inputs_embeds is not None:
-                input_embeds = target_inputs_embeds.clone()
-                input_embeds[:, :-1, :] = target_inputs_embeds[:, 1:, :]
                 next_token_embeds = self.proposer.embed_input_ids(next_token_ids)
-                input_embeds[:, -1, :] = next_token_embeds
-                target_inputs_embeds = input_embeds
+                if num_seqs == 1:
+                    input_embeds = target_inputs_embeds.clone()
+                    input_embeds[:, :-1, :] = target_inputs_embeds[:, 1:, :]
+                    input_embeds[:, -1, :] = next_token_embeds
+                    target_inputs_embeds = input_embeds
+                elif not model_inputs.is_decoding:
+                    # Prefill multi-batch: per-sequence shift for embeds
+                    seq_lengths = model_inputs.seq_length
+                    starts = torch.zeros_like(seq_lengths)
+                    starts[1:] = seq_lengths[:-1].cumsum(0)
+                    ends = seq_lengths.cumsum(0)
+                    shifted_embed_parts = []
+                    for i in range(num_seqs):
+                        s, e = starts[i].item(), ends[i].item()
+                        shifted_embed_parts.append(torch.cat([
+                            target_inputs_embeds[0, s + 1:e],
+                            next_token_embeds[i:i + 1].unsqueeze(0),
+                        ], dim=0))
+                    target_inputs_embeds = torch.cat(shifted_embed_parts).unsqueeze(0)
+                else:
+                    # Decode multi-batch: extract d0 embeds, interleave with next_token_embeds
+                    d0_embeds = target_inputs_embeds[0,
+                                torch.arange(num_seqs, device=target_inputs_embeds.device) * window_size + 1]
+                    draft_embeds = torch.stack([d0_embeds, next_token_embeds], dim=1).flatten(0, 1)
+                    target_inputs_embeds = draft_embeds.unsqueeze(0)
 
         else:
             if model_inputs.is_first_chunk:
@@ -324,9 +375,16 @@ class SpecModelAgent(BaseSpecModelAgent):
             rank = 0 if dist_ctx is None else dist_ctx.rank
             if rank == 0:
                 ids_preview = new_model_inputs.input_ids[0, :min(new_model_inputs.input_ids.shape[1], 16)].tolist()
+                ths_shape = tuple(target_hidden_states.shape) if target_hidden_states is not None else None
+                tie_shape = tuple(target_inputs_embeds.shape) if target_inputs_embeds is not None else None
                 print(
                     f'[SPEC_DEBUG_PREP][step={self._spec_debug_prepare_step}] '
-                    f'new_input_ids_preview={ids_preview}',
+                    f'new_input_ids_preview={ids_preview} '
+                    f'input_ids_shape={tuple(new_model_inputs.input_ids.shape)} '
+                    f'target_hidden_states_shape={ths_shape} '
+                    f'target_inputs_embeds_shape={tie_shape} '
+                    f'is_decoding={model_inputs.is_decoding} '
+                    f'seq_length={seq_length.tolist()}',
                     flush=True,
                 )
         self._spec_debug_prepare_step += 1
@@ -542,7 +600,8 @@ class SpecModelAgent(BaseSpecModelAgent):
         print(f'[DRAFT_FWD] 1st forward: {1000*(t_fwd1-t_fwd0):.1f}ms', flush=True)
         if inputs.is_chunk and not inputs.is_last_chunk:
             # create dummy draft tokens
-            output_draft_ids = inputs.input_ids.new_zeros(1, self.num_spec_tokens)
+            batch_size = inputs.seq_length.size(0)
+            output_draft_ids = inputs.input_ids.new_zeros(batch_size, self.num_spec_tokens)
         else:
             loop_count = self.num_spec_tokens - 1
             draft_token_ids, draft_logits, model_metas, target_hidden_states = self.proposer.get_outputs(

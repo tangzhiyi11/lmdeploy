@@ -174,8 +174,16 @@ class AscendOpsBackend(DlinferOpsBackend):
         effective_is_decoding = step_context.is_decoding and not is_multi_token_decoding
         if step_context.block_offsets.dtype != torch.int32:
             step_context.block_offsets = step_context.block_offsets.to(torch.int32)
-        if not (effective_is_decoding or is_unpaged_prefill):
+        if is_multi_token_decoding:
+            # Multi-token decode uses a single npu_fused_infer_attention_score
+            # call with per-sequence block_offsets (not expanded) and
+            # actual_seq_lengths_q for sequence boundaries.
+            actual_seq_lengths_q = step_context.q_seqlens.cpu().cumsum(0).to(torch.int32)
+        elif not (effective_is_decoding or is_unpaged_prefill):
             step_context.block_offsets = step_context.block_offsets.repeat_interleave(step_context.q_seqlens, 0)
+            actual_seq_lengths_q = None
+        else:
+            actual_seq_lengths_q = None
         if step_context.kv_seqlens.dtype != torch.int32:
             step_context.kv_seqlens = step_context.kv_seqlens.to(torch.int32)
         if step_context.q_seqlens.dtype != torch.int32:
@@ -205,6 +213,13 @@ class AscendOpsBackend(DlinferOpsBackend):
             elif is_unpaged_prefill:
                 q_seqlens_cpu = step_context.q_seqlens.cpu()
                 kv_seqlens_cpu = kv_seqlens_expanded = q_seqlens_cpu
+            elif is_multi_token_decoding:
+                # Keep kv_seqlens per-sequence — the multi-token decode path
+                # uses actual_seq_lengths_q for sequence boundaries instead of
+                # per-token expanded kv_seqlens.
+                q_seqlens_cpu = step_context.q_seqlens.cpu()
+                kv_seqlens_cpu = step_context.kv_seqlens.cpu()
+                kv_seqlens_expanded = kv_seqlens_cpu
             else:
                 q_seqlens_cpu = step_context.q_seqlens.cpu()
                 kv_seqlens_cpu = step_context.kv_seqlens.cpu()
@@ -427,6 +442,7 @@ class AscendOpsBackend(DlinferOpsBackend):
             quant_meta=AscendKVQuantMeta.quant_meta,
             has_initial_state=has_initial_state,
             is_multi_token_decoding=is_multi_token_decoding,
+            actual_seq_lengths_q=actual_seq_lengths_q,
         )
         step_context.attn_metadata = attn_metadata
 

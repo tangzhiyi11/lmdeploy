@@ -174,6 +174,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             inputs_embeds = inputs_embeds.to(self.dtype)
         previous_hidden_states = previous_hidden_states.to(inputs_embeds)
 
+        if inputs_embeds.shape[:2] != previous_hidden_states.shape[:2]:
+            raise ValueError(
+                f'MTP shape mismatch: inputs_embeds {tuple(inputs_embeds.shape)} vs '
+                f'previous_hidden_states {tuple(previous_hidden_states.shape)}. '
+                f'input_ids shape {tuple(input_ids.shape)}')
+
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         previous_hidden_states = self.pre_fc_norm_hidden(previous_hidden_states)
         hidden_states = torch.cat([inputs_embeds, previous_hidden_states], dim=-1)

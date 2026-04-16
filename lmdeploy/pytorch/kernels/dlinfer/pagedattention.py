@@ -135,8 +135,28 @@ def paged_attention_fwd(
     kv_scales: Tensor | None = None,
     kv_zeros: Tensor | None = None,
     quant_bits: int | None = 0,
+    is_multi_token_decoding: bool = False,
+    actual_seq_lengths_q: Tensor | None = None,
 ):
-    if not is_decoding:
+    if is_multi_token_decoding:
+        return ext_ops.multi_token_decode_attention(
+            query_states,
+            key_cache,
+            value_cache,
+            block_offsets,
+            block_size,
+            kv_seqlens,
+            max_kv_seq_len,
+            num_heads,
+            num_kv_heads,
+            softmax_scale=softmax_scale,
+            attn_output=attn_output,
+            actual_seq_lengths_q=actual_seq_lengths_q,
+            kv_scales=kv_scales,
+            kv_zeros=kv_zeros,
+            quant_bits=quant_bits,
+        )
+    elif not is_decoding:
         return prefill_attention(
             query_states,
             key_states,
