@@ -114,5 +114,6 @@ class ConfigBuilder:
                 target_model=target_model,
                 target_cache_cfg=cache_config,
                 dtype=engine_config.dtype,
+                device_type=engine_config.device_type,
             )
         return specdecode_config

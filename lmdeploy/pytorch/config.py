@@ -566,6 +566,7 @@ class SpecDecodeConfig:
         target_cache_cfg: CacheConfig,
         target_model: str = None,
         dtype: str = 'auto',
+        device_type: str = 'auto',
     ):
         model = model or target_model
         model_config = ModelConfig.from_pretrained(model,
@@ -574,6 +575,7 @@ class SpecDecodeConfig:
                                                    is_draft_model=True,
                                                    spec_method=method,
                                                    block_size=target_cache_cfg.block_size,
+                                                   device_type=device_type,
                                                    )
         cache_config = None
         # include medusa
